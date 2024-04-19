@@ -1,0 +1,196 @@
+#include "common.hpp"
+#include <cstring>
+#include <iostream>
+
+
+void kernel_test1()
+{
+    int m = 128;
+    int n = 512;
+
+    uint8_t* Weights = (uint8_t*)_alloc(m * n / 2, 64);
+    for (int i = 0; i < m * n / 2; i++)
+        Weights[i] = 0x55;
+
+    float* W_Scales = (float*)_alloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
+    for (int i = 0; i < m * n / QBLOCK_SIZE; i++)
+        W_Scales[i] = 2.0f;
+
+    uint8_t* W_Zeros = (uint8_t*)_alloc(m * n / QBLOCK_SIZE / 2, 64);
+    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
+        W_Zeros[i] = 0x11;
+
+    float* Input = (float*)_alloc(n * sizeof(float), 64);
+    for (int i = 0; i < n; i++)
+        Input[i] = 2.0f;
+
+    float* Output = (float*)_alloc(m * sizeof(float), 64);
+    std::memset(Output, 0, m * sizeof(float));
+
+    q4f32s_ukernel(
+        Weights, m / 2,
+        W_Scales, m,
+        W_Zeros, m / 2,
+        Input,
+        Output,
+        512);
+
+    bool passed = true;
+    for (int i = 0; i < m; i++) {
+        if (Output[i] != 8192.0f) {
+            std::cout << "Output[" << i << "] = " << Output[i] << std::endl;
+            passed = false;
+        }
+    }
+    if (!passed) {
+        std::cout << std::endl;
+        std::cout << "Kernel Test 1 Failed" << std::endl;
+        exit(0);
+    } else {
+        std::cout << "Kernel Test 1 Passed" << std::endl;
+    }
+
+    _free(Weights);
+    _free(W_Scales);
+    _free(W_Zeros);
+    _free(Input);
+    _free(Output);
+}
+
+void kernel_test2()
+{
+    int m = 128;
+    int n = 512;
+
+    uint8_t* Weights = (uint8_t*)_alloc(m * n / 2, 64);
+    for (int i = 0; i < m * n / 2; i++)
+        Weights[i] = 0x55;
+
+    float* W_Scales = (float*)_alloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
+    for (int j = 0; j < m; j++) { // row idx
+        for (int i = 0; i < n / QBLOCK_SIZE; i++){ // col idx
+            if (i % 2 == 0) {
+                W_Scales[i * m + j] = 1.0f;
+            } else {
+                W_Scales[i * m + j] = 2.0f;
+            }
+        }
+    }
+
+    uint8_t* W_Zeros = (uint8_t*)_alloc(m * n / QBLOCK_SIZE / 2, 64);
+    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
+        W_Zeros[i] = 0x11;
+
+    float* Input = (float*)_alloc(n * sizeof(float), 64);
+    for (int i = 0; i < n; i++)
+        Input[i] = 2.0f;
+
+    float* Output = (float*)_alloc(m * sizeof(float), 64);
+    std::memset(Output, 0, m * sizeof(float));
+
+    q4f32s_ukernel(
+        Weights, m / 2,
+        W_Scales, m,
+        W_Zeros, m / 2,
+        Input,
+        Output,
+        512);
+
+    bool passed = true;
+    for (int i = 0; i < m; i++) {
+        if (Output[i] != 4096.0f) {
+            std::cout << "Output[" << i << "] = " << Output[i] << std::endl;
+            passed = false;
+        }
+    }
+    if (!passed) {
+        std::cout << std::endl;
+        std::cout << "Kernel Test 2 Failed" << std::endl;
+        exit(0);
+    } else {
+        std::cout << "Kernel Test 2 Passed" << std::endl;
+    }
+
+    _free(Weights);
+    _free(W_Scales);
+    _free(W_Zeros);
+    _free(Input);
+    _free(Output);
+}
+
+void kernel_test3()
+{
+    int m = 128;
+    int n = 512;
+
+    uint8_t* Weights = (uint8_t*)_alloc(m * n / 2, 64);
+    for (int j = 0; j < m/2; j++) { // row idx
+        for (int i = 0; i < n; i++) { // col idx
+            if (i % 2 == 0) {
+                Weights[i * m/2 + j] = 0x33;
+            } else {
+                Weights[i * m/2 + j] = 0x55;
+            }
+        }
+    }
+
+    float* W_Scales = (float*)_alloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
+    for (int j = 0; j < m; j++) { // row idx
+        for (int i = 0; i < n / QBLOCK_SIZE; i++){ // col idx
+            if (i % 2 == 0) {
+                W_Scales[i * m + j] = 1.0f;
+            } else {
+                W_Scales[i * m + j] = 2.0f;
+            }
+        }
+    }
+
+    uint8_t* W_Zeros = (uint8_t*)_alloc(m * n / QBLOCK_SIZE / 2, 64);
+    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
+        W_Zeros[i] = 0x11;
+
+    float* Input = (float*)_alloc(n * sizeof(float), 64);
+    for (int i = 0; i < n; i++)
+        Input[i] = 2.0f;
+
+    float* Output = (float*)_alloc(m * sizeof(float), 64);
+    std::memset(Output, 0, m * sizeof(float));
+
+    q4f32s_ukernel(
+        Weights, m / 2,
+        W_Scales, m,
+        W_Zeros, m / 2,
+        Input,
+        Output,
+        512);
+
+    bool passed = true;
+    for (int i = 0; i < m; i++) {
+        if (Output[i] != 3072.0f) {
+            std::cout << "Output[" << i << "] = " << Output[i] << std::endl;
+            passed = false;
+        }
+    }
+    if (!passed) {
+        std::cout << std::endl;
+        std::cout << "Kernel Test 3 Failed" << std::endl;
+        exit(0);
+    } else {
+        std::cout << "Kernel Test 3 Passed" << std::endl;
+    }
+
+    _free(Weights);
+    _free(W_Scales);
+    _free(W_Zeros);
+    _free(Input);
+    _free(Output);
+}
+
+
+int main()
+{
+    kernel_test1();
+    kernel_test2();
+    kernel_test3();
+    return 0;
+}

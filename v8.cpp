@@ -1,15 +1,42 @@
+#include "common.hpp"
 #include <cassert>
-#include <chrono>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <iostream>
 #include <thread>
 #include <vector>
 
-using namespace std;
+// Set accumulators to zero (zmm9-zmm16)
+void q4f32s_ukernel_prelude()
+{
+    asm volatile(
+        "vpxorq %%zmm17,%%zmm17,%%zmm17 \n\t"
+        "vpxorq %%zmm18,%%zmm18,%%zmm18 \n\t"
+        "vpxorq %%zmm19,%%zmm19,%%zmm19 \n\t"
+        "vpxorq %%zmm20,%%zmm20,%%zmm20 \n\t"
+        "vpxorq %%zmm21,%%zmm21,%%zmm21 \n\t"
+        "vpxorq %%zmm22,%%zmm22,%%zmm22 \n\t"
+        "vpxorq %%zmm23,%%zmm23,%%zmm23 \n\t"
+        "vpxorq %%zmm24,%%zmm24,%%zmm24 \n\t" ::
+            :);
+}
 
-void asm_ukernel_v8(
+// Dump Accumulators to memory (zmm9-zmm16)
+void q4f32s_ukernel_epiloque(float* ptr)
+{
+    asm volatile(
+        "vmovups %%zmm17,      (%0) \n\t"
+        "vmovups %%zmm18,  4*16(%0) \n\t"
+        "vmovups %%zmm19,4*16*2(%0) \n\t"
+        "vmovups %%zmm20,4*16*3(%0) \n\t"
+        "vmovups %%zmm21,4*16*4(%0) \n\t"
+        "vmovups %%zmm22,4*16*5(%0) \n\t"
+        "vmovups %%zmm23,4*16*6(%0) \n\t"
+        "vmovups %%zmm24,4*16*7(%0) \n\t"
+        :
+        : "r"(ptr)
+        : "memory");
+}
+
+void q4f32s_ukernel(
     uint8_t* w, // Weight, offset from the global pointer
     uint64_t w_cs, // Col stride for weights
     float* scales, // Weight scales, offset from the global pointer
@@ -116,14 +143,14 @@ void asm_ukernel_v8(
         "vpunpcklbw %%xmm8,%%xmm25,%%xmm8 \n\t"
 
         // Set accumulators to zero (zmm9-zmm16)
-        "vpxorq %%zmm17,%%zmm17,%%zmm17 \n\t"
-        "vpxorq %%zmm18,%%zmm18,%%zmm18 \n\t"
-        "vpxorq %%zmm19,%%zmm19,%%zmm19 \n\t"
-        "vpxorq %%zmm20,%%zmm20,%%zmm20 \n\t"
-        "vpxorq %%zmm21,%%zmm21,%%zmm21 \n\t"
-        "vpxorq %%zmm22,%%zmm22,%%zmm22 \n\t"
-        "vpxorq %%zmm23,%%zmm23,%%zmm23 \n\t"
-        "vpxorq %%zmm24,%%zmm24,%%zmm24 \n\t"
+        //        "vpxorq %%zmm17,%%zmm17,%%zmm17 \n\t"
+        //        "vpxorq %%zmm18,%%zmm18,%%zmm18 \n\t"
+        //        "vpxorq %%zmm19,%%zmm19,%%zmm19 \n\t"
+        //        "vpxorq %%zmm20,%%zmm20,%%zmm20 \n\t"
+        //        "vpxorq %%zmm21,%%zmm21,%%zmm21 \n\t"
+        //        "vpxorq %%zmm22,%%zmm22,%%zmm22 \n\t"
+        //        "vpxorq %%zmm23,%%zmm23,%%zmm23 \n\t"
+        //        "vpxorq %%zmm24,%%zmm24,%%zmm24 \n\t"
 
         // Main Loop
         "xorq %%rcx,%%rcx \n\t"
@@ -357,14 +384,14 @@ void asm_ukernel_v8(
         "jne      .MAINLOOP%=     \n\t"
 
         // Store Outputs
-        "vmovups %%zmm17,      (%%r11) \n\t"
-        "vmovups %%zmm18,  4*16(%%r11) \n\t"
-        "vmovups %%zmm19,4*16*2(%%r11) \n\t"
-        "vmovups %%zmm20,4*16*3(%%r11) \n\t"
-        "vmovups %%zmm21,4*16*4(%%r11) \n\t"
-        "vmovups %%zmm22,4*16*5(%%r11) \n\t"
-        "vmovups %%zmm23,4*16*6(%%r11) \n\t"
-        "vmovups %%zmm24,4*16*7(%%r11) \n\t"
+        //        "vmovups %%zmm17,      (%%r11) \n\t"
+        //        "vmovups %%zmm18,  4*16(%%r11) \n\t"
+        //        "vmovups %%zmm19,4*16*2(%%r11) \n\t"
+        //        "vmovups %%zmm20,4*16*3(%%r11) \n\t"
+        //        "vmovups %%zmm21,4*16*4(%%r11) \n\t"
+        //        "vmovups %%zmm22,4*16*5(%%r11) \n\t"
+        //        "vmovups %%zmm23,4*16*6(%%r11) \n\t"
+        //        "vmovups %%zmm24,4*16*7(%%r11) \n\t"
 
         :
         : "m"(w),
@@ -389,67 +416,7 @@ void asm_ukernel_v8(
         "k1", "k2");
 }
 
-#define QBLOCK_SIZE 128
-
-void test()
-{
-    int m = 128;
-    int n = 512;
-
-    uint8_t* Weights = (uint8_t*)_aligned_malloc(m * n / 2, 64);
-    for (int i = 0; i < m * n / 2; i++)
-        Weights[i] = 0x55;
-
-    float* W_Scales = (float*)_aligned_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
-    for (int i = 0; i < m * n / QBLOCK_SIZE; i++)
-        W_Scales[i] = 2.0f;
-
-    uint8_t* W_Zeros = (uint8_t*)_aligned_malloc(m * n / QBLOCK_SIZE / 2, 64);
-    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
-        W_Zeros[i] = 0x11;
-
-    float* Input = (float*)_aligned_malloc(n * sizeof(float), 64);
-    for (int i = 0; i < n; i++)
-        Input[i] = 2.0f;
-
-    float* Output = (float*)_aligned_malloc(m * sizeof(float), 64);
-    memset(Output, 0, m * sizeof(float));
-
-    asm_ukernel_v8(
-        Weights, m / 2,
-        W_Scales, m,
-        W_Zeros, m / 2,
-        Input,
-        Output,
-        512);
-
-    bool passed = true;
-    for (int i = 0; i < m; i++) {
-        if (Output[i] != 8192.0f) {
-            cout << "Output[" << i << "] = " << Output[i] << endl;
-            passed = false;
-        }
-    }
-    if (!passed) {
-        cout << endl;
-        cout << "Tested Failed" << endl;
-        exit(0);
-    } else {
-        cout << "Tested Passed" << endl;
-    }
-    std::cout.flush();
-
-    _aligned_free(Weights);
-    _aligned_free(W_Scales);
-    _aligned_free(W_Zeros);
-    _aligned_free(Input);
-    _aligned_free(Output);
-}
-
-// column major indexing helper
-#define CM(ptr, row, col, col_stride) ((ptr) + (col * (col_stride)) + (row))
-
-void egemv(
+void q4f32s_egemv(
     uint8_t* w,
     float* s,
     uint8_t* z,
@@ -461,26 +428,28 @@ void egemv(
     assert(m % 128 == 0 && "Row size must be divisble by 128");
     assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
 
-    auto process_128_rows_512_cols = [&](uint8_t* w, float* s, uint8_t* z,
-                                         float* in, float* out,
-                                         int start_row, int end_row) {
+    auto process_128_rows_n_cols = [&](uint8_t* w, float* s, uint8_t* z,
+                                       float* in, float* out,
+                                       int start_row, int end_row) {
         const int n_col_blocks = n / 512;
 
         for (int j = start_row; j < end_row; j += 128) {
+            q4f32s_ukernel_prelude();
             for (int col_block = 0; col_block < n_col_blocks; col_block++) {
                 int i = col_block * 512;
-                asm_ukernel_v8(
+                q4f32s_ukernel(
                     CM(w, j, i / 2, m / 2), m / 2,
                     CM(s, j, i / QBLOCK_SIZE, m), m,
                     CM(z, j, i / QBLOCK_SIZE / 2, m / 2), m / 2,
-                    in + i, out + j,
+                    in + i, nullptr,
                     512);
             }
+            q4f32s_ukernel_epiloque(out + j);
         }
     };
 
     size_t n_threads = 4;
-    vector<thread> threads(n_threads);
+    std::vector<std::thread> threads(n_threads);
 
     int rows_per_thread = m / n_threads;
     assert(rows_per_thread % 128 == 0 && "Thread row blocks size must be divisible by 128");
@@ -488,53 +457,11 @@ void egemv(
     int end_row;
     for (int thread_id = 0; thread_id < n_threads; thread_id++) {
         end_row = start_row + rows_per_thread;
-        threads[thread_id] = thread(process_128_rows_512_cols, w, s, z, in, out, start_row, end_row);
+        threads[thread_id] = std::thread(process_128_rows_n_cols, w, s, z, in, out, start_row, end_row);
         start_row += rows_per_thread;
     }
     for (auto& t : threads) {
         t.join();
     }
     threads.clear();
-}
-
-void bench()
-{
-    uint64_t m = 4096;
-    uint64_t n = 14336;
-
-    uint8_t* w = (uint8_t*)_aligned_malloc(m * n / 2, 64);
-    float* s = (float*)_aligned_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)_aligned_malloc(m * n / QBLOCK_SIZE / 2, 64);
-    float* in = (float*)_aligned_malloc(n * sizeof(float), 64);
-    float* out = (float*)_aligned_malloc(m * sizeof(float), 64);
-
-    const int NIT = 500;
-
-    auto start = chrono::high_resolution_clock::now();
-    for (int it = 0; it < NIT; it++) {
-        egemv(w, s, z, in, out, m, n);
-    }
-    auto end = chrono::high_resolution_clock::now();
-
-    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-
-    cout << "total: " << sec << " (s)" << endl;
-    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
-
-    uint64_t flops_processed = m * n * 2 * NIT;
-    double flops_sec = flops_processed / sec;
-    double gflops = flops_sec / (1e9);
-    cout << "GFLOPS: " << gflops << endl;
-
-    _aligned_free(w);
-    _aligned_free(s);
-    _aligned_free(z);
-    _aligned_free(in);
-    _aligned_free(out);
-}
-
-int main()
-{
-    test();
-    bench();
 }

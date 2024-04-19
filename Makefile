@@ -1,13 +1,20 @@
 all: v7 v8
 
-test: test.cpp common.o v7.o
-	g++ -march=native -g test.cpp common.o v7.o -o test
+ktest: kernel_test.cpp common.o v7.o v8.o
+	g++ -march=native -g -DKERNEL_VER=7 kernel_test.cpp common.o v7.o -o ktest7.exe && \
+	g++ -march=native -g -DKERNEL_VER=8 kernel_test.cpp common.o v8.o -o ktest8.exe && \
+	./ktest7.exe && ./ktest8.exe
 
-v7: v7.cpp
-	g++ -march=native -g v7.cpp -c -o v7.o
+egtest: egemv_test.cpp common.o v7.o v8.o
+	g++ -march=native -g -DVER=7 egemv_test.cpp common.o v7.o -o egtest7.exe && \
+	g++ -march=native -g -DVER=8 egemv_test.cpp common.o v8.o -o egtest8.exe && \
+	./egtest7.exe && ./egtest8.exe
 
-v8: v8.cpp
-	g++ -march=native -O3 v8.cpp -o v8
+v7.o: v7.cpp
+	g++ -march=native -c v7.cpp 
+
+v8.o: v8.cpp
+	g++ -march=native -c v8.cpp
 
 common: common.cpp
 	g++ common.cpp -c -o common.o
@@ -16,4 +23,4 @@ fmt:
 	clang-format -style=WebKit -i *.cpp *.hpp
 
 clean:
-	rm -f *.o v7 v8 test *.exe
+	rm -f *.o *.exe

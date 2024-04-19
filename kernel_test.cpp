@@ -2,7 +2,6 @@
 #include <cstring>
 #include <iostream>
 
-
 void kernel_test1()
 {
     int m = 128;
@@ -27,13 +26,15 @@ void kernel_test1()
     float* Output = (float*)_alloc(m * sizeof(float), 64);
     std::memset(Output, 0, m * sizeof(float));
 
+    q4f32s_ukernel_prelude();
     q4f32s_ukernel(
         Weights, m / 2,
         W_Scales, m,
         W_Zeros, m / 2,
         Input,
-        Output,
+        nullptr,
         512);
+    q4f32s_ukernel_epiloque(Output);
 
     bool passed = true;
     for (int i = 0; i < m; i++) {
@@ -68,7 +69,7 @@ void kernel_test2()
 
     float* W_Scales = (float*)_alloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
     for (int j = 0; j < m; j++) { // row idx
-        for (int i = 0; i < n / QBLOCK_SIZE; i++){ // col idx
+        for (int i = 0; i < n / QBLOCK_SIZE; i++) { // col idx
             if (i % 2 == 0) {
                 W_Scales[i * m + j] = 1.0f;
             } else {
@@ -88,6 +89,7 @@ void kernel_test2()
     float* Output = (float*)_alloc(m * sizeof(float), 64);
     std::memset(Output, 0, m * sizeof(float));
 
+    q4f32s_ukernel_prelude();
     q4f32s_ukernel(
         Weights, m / 2,
         W_Scales, m,
@@ -95,6 +97,7 @@ void kernel_test2()
         Input,
         Output,
         512);
+    q4f32s_ukernel_epiloque(Output);
 
     bool passed = true;
     for (int i = 0; i < m; i++) {
@@ -124,19 +127,19 @@ void kernel_test3()
     int n = 512;
 
     uint8_t* Weights = (uint8_t*)_alloc(m * n / 2, 64);
-    for (int j = 0; j < m/2; j++) { // row idx
+    for (int j = 0; j < m / 2; j++) { // row idx
         for (int i = 0; i < n; i++) { // col idx
             if (i % 2 == 0) {
-                Weights[i * m/2 + j] = 0x33;
+                Weights[i * m / 2 + j] = 0x33;
             } else {
-                Weights[i * m/2 + j] = 0x55;
+                Weights[i * m / 2 + j] = 0x55;
             }
         }
     }
 
     float* W_Scales = (float*)_alloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
     for (int j = 0; j < m; j++) { // row idx
-        for (int i = 0; i < n / QBLOCK_SIZE; i++){ // col idx
+        for (int i = 0; i < n / QBLOCK_SIZE; i++) { // col idx
             if (i % 2 == 0) {
                 W_Scales[i * m + j] = 1.0f;
             } else {
@@ -156,13 +159,15 @@ void kernel_test3()
     float* Output = (float*)_alloc(m * sizeof(float), 64);
     std::memset(Output, 0, m * sizeof(float));
 
+    q4f32s_ukernel_prelude();
     q4f32s_ukernel(
         Weights, m / 2,
         W_Scales, m,
         W_Zeros, m / 2,
         Input,
-        Output,
+        nullptr,
         512);
+    q4f32s_ukernel_epiloque(Output);
 
     bool passed = true;
     for (int i = 0; i < m; i++) {
@@ -186,11 +191,12 @@ void kernel_test3()
     _free(Output);
 }
 
-
 int main()
 {
+    std::cout << "Kenel V" << KERNEL_VER << " Test" << std::endl;
     kernel_test1();
     kernel_test2();
     kernel_test3();
+    std::cout << std::endl;
     return 0;
 }

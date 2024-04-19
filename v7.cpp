@@ -1,8 +1,40 @@
+#include "common.hpp"
 #include <cassert>
 #include <cstdint>
 #include <thread>
 #include <vector>
-#include "common.hpp"
+
+void q4f32s_ukernel_prelude()
+{
+    // Set accumulators to zero (zmm9-zmm16)
+    asm volatile(
+        "vpxorq %%zmm17,%%zmm17,%%zmm17 \n\t"
+        "vpxorq %%zmm18,%%zmm18,%%zmm18 \n\t"
+        "vpxorq %%zmm19,%%zmm19,%%zmm19 \n\t"
+        "vpxorq %%zmm20,%%zmm20,%%zmm20 \n\t"
+        "vpxorq %%zmm21,%%zmm21,%%zmm21 \n\t"
+        "vpxorq %%zmm22,%%zmm22,%%zmm22 \n\t"
+        "vpxorq %%zmm23,%%zmm23,%%zmm23 \n\t"
+        "vpxorq %%zmm24,%%zmm24,%%zmm24 \n\t" ::
+            :);
+}
+
+void q4f32s_ukernel_epiloque(float* ptr)
+{
+    // Dump Accumulators to zero (zmm9-zmm16)
+    asm volatile(
+        "vmovups %%zmm17,      (%0) \n\t"
+        "vmovups %%zmm18,  4*16(%0) \n\t"
+        "vmovups %%zmm19,4*16*2(%0) \n\t"
+        "vmovups %%zmm20,4*16*3(%0) \n\t"
+        "vmovups %%zmm21,4*16*4(%0) \n\t"
+        "vmovups %%zmm22,4*16*5(%0) \n\t"
+        "vmovups %%zmm23,4*16*6(%0) \n\t"
+        "vmovups %%zmm24,4*16*7(%0) \n\t"
+        :
+        : "r"(ptr)
+        : "memory");
+}
 
 void q4f32s_ukernel(
     uint8_t* w, // Weight, offset from the global pointer
@@ -110,15 +142,15 @@ void q4f32s_ukernel(
         "vpunpcklbw %%xmm7,%%xmm31,%%xmm7 \n\t"
         "vpunpcklbw %%xmm8,%%xmm25,%%xmm8 \n\t"
 
-        // Set accumulators to zero (zmm9-zmm16)
-        "vpxorq %%zmm17,%%zmm17,%%zmm17 \n\t"
-        "vpxorq %%zmm18,%%zmm18,%%zmm18 \n\t"
-        "vpxorq %%zmm19,%%zmm19,%%zmm19 \n\t"
-        "vpxorq %%zmm20,%%zmm20,%%zmm20 \n\t"
-        "vpxorq %%zmm21,%%zmm21,%%zmm21 \n\t"
-        "vpxorq %%zmm22,%%zmm22,%%zmm22 \n\t"
-        "vpxorq %%zmm23,%%zmm23,%%zmm23 \n\t"
-        "vpxorq %%zmm24,%%zmm24,%%zmm24 \n\t"
+        // Set accumulators to zero (zmm9-zmm16) --> prelaunch
+        //        "vpxorq %%zmm17,%%zmm17,%%zmm17 \n\t"
+        //        "vpxorq %%zmm18,%%zmm18,%%zmm18 \n\t"
+        //        "vpxorq %%zmm19,%%zmm19,%%zmm19 \n\t"
+        //        "vpxorq %%zmm20,%%zmm20,%%zmm20 \n\t"
+        //        "vpxorq %%zmm21,%%zmm21,%%zmm21 \n\t"
+        //        "vpxorq %%zmm22,%%zmm22,%%zmm22 \n\t"
+        //        "vpxorq %%zmm23,%%zmm23,%%zmm23 \n\t"
+        //        "vpxorq %%zmm24,%%zmm24,%%zmm24 \n\t"
 
         // Main Loop
         "xorq %%rcx,%%rcx \n\t"
@@ -337,15 +369,15 @@ void q4f32s_ukernel(
         "testq    %%r12,   %%rcx  \n\t"
         "jne      .MAINLOOP%=     \n\t"
 
-        // Store Outputs
-        "vmovups %%zmm17,      (%%r11) \n\t"
-        "vmovups %%zmm18,  4*16(%%r11) \n\t"
-        "vmovups %%zmm19,4*16*2(%%r11) \n\t"
-        "vmovups %%zmm20,4*16*3(%%r11) \n\t"
-        "vmovups %%zmm21,4*16*4(%%r11) \n\t"
-        "vmovups %%zmm22,4*16*5(%%r11) \n\t"
-        "vmovups %%zmm23,4*16*6(%%r11) \n\t"
-        "vmovups %%zmm24,4*16*7(%%r11) \n\t"
+        // Store Outputs --> epiloque
+        //        "vmovups %%zmm17,      (%%r11) \n\t"
+        //        "vmovups %%zmm18,  4*16(%%r11) \n\t"
+        //        "vmovups %%zmm19,4*16*2(%%r11) \n\t"
+        //        "vmovups %%zmm20,4*16*3(%%r11) \n\t"
+        //        "vmovups %%zmm21,4*16*4(%%r11) \n\t"
+        //        "vmovups %%zmm22,4*16*5(%%r11) \n\t"
+        //        "vmovups %%zmm23,4*16*6(%%r11) \n\t"
+        //        "vmovups %%zmm24,4*16*7(%%r11) \n\t"
 
         :
         : "m"(w),
@@ -388,15 +420,17 @@ void q4f32s_egemv(
         const int n_col_blocks = n / 512;
 
         for (int j = start_row; j < end_row; j += 128) {
+            q4f32s_ukernel_prelude();
             for (int col_block = 0; col_block < n_col_blocks; col_block++) {
                 int i = col_block * 512;
                 q4f32s_ukernel(
                     CM(w, j, i / 2, m / 2), m / 2,
                     CM(s, j, i / QBLOCK_SIZE, m), m,
                     CM(z, j, i / QBLOCK_SIZE / 2, m / 2), m / 2,
-                    in + i, out + j,
+                    in + i, nullptr,
                     512);
             }
+            q4f32s_ukernel_epiloque(out + j);
         }
     };
 

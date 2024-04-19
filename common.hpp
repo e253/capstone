@@ -6,6 +6,11 @@
 // column major indexing helper
 #define CM(ptr, row, col, col_stride) ((ptr) + (col * (col_stride)) + (row))
 
+// Call before using the ukernel
+void q4f32s_ukernel_prelude();
+// Call after using the ukernel to put result in ptr.
+void q4f32s_ukernel_epiloque(float* ptr);
+
 void q4f32s_ukernel(
     uint8_t* w, // Weight, offset from the global pointer
     uint64_t w_cs, // Col stride for weights

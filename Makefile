@@ -10,6 +10,11 @@ egtest: egemv_test.cpp common.o v7.o v8.o
 	g++ -march=native -g -DVER=8 egemv_test.cpp common.o v8.o -o egtest8.exe && \
 	./egtest7.exe && ./egtest8.exe
 
+bench: egemv_bench.cpp common.o v7.o v8.o
+	g++ -march=native -O3 -DVER=7 egemv_bench.cpp common.o v7.o -o bench7.exe && \
+	g++ -march=native -O3 -DVER=8 egemv_bench.cpp common.o v8.o -o bench8.exe && \
+	./bench7.exe && ./bench8.exe
+
 v7.o: v7.cpp
 	g++ -march=native -c v7.cpp 
 

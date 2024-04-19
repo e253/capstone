@@ -414,9 +414,9 @@ void q4f32s_egemv(
     assert(m % 128 == 0 && "Row size must be divisble by 128");
     assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
 
-    auto process_128_rows_512_cols = [&](uint8_t* w, float* s, uint8_t* z,
-                                         float* in, float* out,
-                                         int start_row, int end_row) {
+    auto process_128_rows_n_cols = [&](uint8_t* w, float* s, uint8_t* z,
+                                       float* in, float* out,
+                                       int start_row, int end_row) {
         const int n_col_blocks = n / 512;
 
         for (int j = start_row; j < end_row; j += 128) {
@@ -434,16 +434,17 @@ void q4f32s_egemv(
         }
     };
 
-    size_t n_threads = 4;
+    const size_t n_threads = 4;
     std::vector<std::thread> threads(n_threads);
 
     int rows_per_thread = m / n_threads;
     assert(rows_per_thread % 128 == 0 && "Thread row blocks size must be divisible by 128");
     int start_row = 0;
     int end_row;
+
     for (int thread_id = 0; thread_id < n_threads; thread_id++) {
         end_row = start_row + rows_per_thread;
-        threads[thread_id] = std::thread(process_128_rows_512_cols, w, s, z, in, out, start_row, end_row);
+        threads[thread_id] = std::thread(process_128_rows_n_cols, w, s, z, in, out, start_row, end_row);
         start_row += rows_per_thread;
     }
     for (auto& t : threads) {

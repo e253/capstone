@@ -72,13 +72,13 @@ void q4f32s_ukernel(
 
         // Initialize Scales
         "vmovups (%%rax),      %%zmm9  \n\t"
-        "vmovups 4*16(%%rax),  %%zmm10 \n\t"
-        "vmovups 4*16*2(%%rax),%%zmm11 \n\t"
-        "vmovups 4*16*3(%%rax),%%zmm12 \n\t"
-        "vmovups 4*16*4(%%rax),%%zmm13 \n\t"
-        "vmovups 4*16*5(%%rax),%%zmm14 \n\t"
-        "vmovups 4*16*6(%%rax),%%zmm15 \n\t"
-        "vmovups 4*16*7(%%rax),%%zmm16 \n\t"
+        "vmovups 64*1(%%rax),  %%zmm10 \n\t"
+        "vmovups 64*2(%%rax),%%zmm11 \n\t"
+        "vmovups 64*3(%%rax),%%zmm12 \n\t"
+        "vmovups 64*4(%%rax),%%zmm13 \n\t"
+        "vmovups 64*5(%%rax),%%zmm14 \n\t"
+        "vmovups 64*6(%%rax),%%zmm15 \n\t"
+        "vmovups 64*7(%%rax),%%zmm16 \n\t"
         "leaq (%%rax,%%rbx),%%rax      \n\t"
 
         // Initialize Zeros.
@@ -317,13 +317,13 @@ void q4f32s_ukernel(
 
         // Scales
         "vmovups (%%rax),%%zmm9        \n\t"
-        "vmovups 4*16(%%rax),%%zmm10   \n\t"
-        "vmovups 4*16*2(%%rax),%%zmm11 \n\t"
-        "vmovups 4*16*3(%%rax),%%zmm12 \n\t"
-        "vmovups 4*16*4(%%rax),%%zmm13 \n\t"
-        "vmovups 4*16*5(%%rax),%%zmm14 \n\t"
-        "vmovups 4*16*6(%%rax),%%zmm15 \n\t"
-        "vmovups 4*16*7(%%rax),%%zmm16 \n\t"
+        "vmovups 64(%%rax),%%zmm10   \n\t"
+        "vmovups 64*2(%%rax),%%zmm11 \n\t"
+        "vmovups 64*3(%%rax),%%zmm12 \n\t"
+        "vmovups 64*4(%%rax),%%zmm13 \n\t"
+        "vmovups 64*5(%%rax),%%zmm14 \n\t"
+        "vmovups 64*6(%%rax),%%zmm15 \n\t"
+        "vmovups 64*7(%%rax),%%zmm16 \n\t"
         "leaq (%%rax,%%rbx),%%rax       \n\t"
 
         // Zeros
@@ -387,16 +387,18 @@ void q4f32s_ukernel(
         "vpunpcklbw %%xmm7,%%xmm31,%%xmm7 \n\t"
         "vpunpcklbw %%xmm8,%%xmm25,%%xmm8 \n\t"
 
+        "jmp .LOOPEPILOQUE%= \n\t" // don't pf if we just loaded values
+
         // Prefetch Block for Scales / Zeros
         ".PREFETCHZS%=: \n\t"
-        "prefetcht0 8*4*16(%%rax) \n\t"
-        "prefetcht0 8*4*16*2(%%rax) \n\t"
-        "prefetcht0 8*4*16*3(%%rax) \n\t"
-        "prefetcht0 8*4*16*4(%%rax) \n\t"
-        "prefetcht0 8*4*16*5(%%rax) \n\t"
-        "prefetcht0 8*4*16*6(%%rax) \n\t"
-        "prefetcht0 8*4*16*7(%%rax) \n\t"
-        "prefetcht0 (%%r8, %%r9, 8) \n\t"
+        "prefetcht0 (%%rax) \n\t"
+        "prefetcht0 64*2(%%rax) \n\t"
+        "prefetcht0 64*3(%%rax) \n\t"
+        "prefetcht0 64*4(%%rax) \n\t"
+        "prefetcht0 64*5(%%rax) \n\t"
+        "prefetcht0 64*6(%%rax) \n\t"
+        "prefetcht0 64*7(%%rax) \n\t"
+        "prefetcht0 (%%r8) \n\t"
 
         ".LOOPEPILOQUE%=:         \n\t"
         "incq     %%rcx           \n\t"

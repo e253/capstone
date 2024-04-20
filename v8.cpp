@@ -15,8 +15,10 @@ void q4f32s_ukernel_prelude()
         "vpxorq %%zmm21,%%zmm21,%%zmm21 \n\t"
         "vpxorq %%zmm22,%%zmm22,%%zmm22 \n\t"
         "vpxorq %%zmm23,%%zmm23,%%zmm23 \n\t"
-        "vpxorq %%zmm24,%%zmm24,%%zmm24 \n\t" ::
-            :);
+        "vpxorq %%zmm24,%%zmm24,%%zmm24 \n\t"
+        :
+        :
+        :);
 }
 
 // Dump Accumulators to memory (zmm9-zmm16)
@@ -66,20 +68,20 @@ void q4f32s_ukernel(
         "kmovw    %%r13d,   %%k1     \n\t"
 
         // Set and mask (xmm0)
-        "movl $0x0F0F0F0F,  %%r13d   \n"
-        "movd      %%r13d,  %%xmm0   \n"
-        "pshufd $0,%%xmm0,  %%xmm0   \n"
+        "movl $0x0F0F0F0F,  %%r13d   \n\t"
+        "movd      %%r13d,  %%xmm0   \n\t"
+        "pshufd $0,%%xmm0,  %%xmm0   \n\t"
 
         // Initialize Scales
-        "vmovups (%%rax),      %%zmm9  \n\t"
-        "vmovups 4*16(%%rax),  %%zmm10 \n\t"
-        "vmovups 4*16*2(%%rax),%%zmm11 \n\t"
-        "vmovups 4*16*3(%%rax),%%zmm12 \n\t"
-        "vmovups 4*16*4(%%rax),%%zmm13 \n\t"
-        "vmovups 4*16*5(%%rax),%%zmm14 \n\t"
-        "vmovups 4*16*6(%%rax),%%zmm15 \n\t"
-        "vmovups 4*16*7(%%rax),%%zmm16 \n\t"
-        "leaq (%%rax,%%rbx),%%rax      \n\t"
+        "vmovups (%%rax),     %%zmm9  \n\t"
+        "vmovups 64(%%rax),  %%zmm10 \n\t"
+        "vmovups 64*2(%%rax),%%zmm11 \n\t"
+        "vmovups 64*3(%%rax),%%zmm12 \n\t"
+        "vmovups 64*4(%%rax),%%zmm13 \n\t"
+        "vmovups 64*5(%%rax),%%zmm14 \n\t"
+        "vmovups 64*6(%%rax),%%zmm15 \n\t"
+        "vmovups 64*7(%%rax),%%zmm16 \n\t"
+        "leaq (%%rax,%%rbx),%%rax     \n\t"
 
         // Initialize Zeros.
         "vmovdqu8 (%%r8),  %%xmm1%{%%k1%}%{z%} \n\t"
@@ -169,7 +171,6 @@ void q4f32s_ukernel(
 
         "vpandq %%xmm30,%%xmm0,%%xmm30 \n\t" // 1: tmp &= 0x0F
         "vpandq %%xmm31,%%xmm0,%%xmm31 \n\t" // 2
-
         "vpsrld $4,%%xmm25,%%xmm25 \n\t" // 1: weights >> 4
         "vpsrld $4,%%xmm26,%%xmm26 \n\t" // 2
 
@@ -307,15 +308,15 @@ void q4f32s_ukernel(
         "jne      .LOOPEPILOQUE%= \n\t"
 
         // Scales
-        "vmovups (%%rax),%%zmm9        \n\t"
-        "vmovups 4*16(%%rax),%%zmm10   \n\t"
-        "vmovups 4*16*2(%%rax),%%zmm11 \n\t"
-        "vmovups 4*16*3(%%rax),%%zmm12 \n\t"
-        "vmovups 4*16*4(%%rax),%%zmm13 \n\t"
-        "vmovups 4*16*5(%%rax),%%zmm14 \n\t"
-        "vmovups 4*16*6(%%rax),%%zmm15 \n\t"
-        "vmovups 4*16*7(%%rax),%%zmm16 \n\t"
-        "leaq (%%rax,%%rbx),%%rax       \n\t"
+        "vmovups (%%rax),%%zmm9       \n\t"
+        "vmovups 64*1(%%rax),%%zmm10   \n\t"
+        "vmovups 64*2(%%rax),%%zmm11 \n\t"
+        "vmovups 64*3(%%rax),%%zmm12 \n\t"
+        "vmovups 64*4(%%rax),%%zmm13 \n\t"
+        "vmovups 64*5(%%rax),%%zmm14 \n\t"
+        "vmovups 64*6(%%rax),%%zmm15 \n\t"
+        "vmovups 64*7(%%rax),%%zmm16 \n\t"
+        "leaq (%%rax,%%rbx),%%rax     \n\t"
 
         // Zeros
         "vmovdqu8 (%%r8),%%xmm1%{%%k1%}%{z%}   \n\t"

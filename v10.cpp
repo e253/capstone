@@ -157,10 +157,12 @@ void q4f32s_ukernel(
         ".MAINLOOP%=:     \n\t"
 
         // Load Input
+        "prefetcht0 64(%%r10) \n\t"
         "vbroadcastss (%%r10),%%zmm29 \n\t"
         "addq $4,%%r10 \n\t" // in += 1 (4 bytes)
 
         // ======= 1 + 2 =======
+        "prefetcht0 (%%rsi, %%rdi, 8) \n\t"
         "vmovdqu8 (%%rsi),%%xmm25%{%%k1%}%{z%}  \n\t" // 1: load 16 weights to lower 64 bits
         "vmovdqu8 8(%%rsi),%%xmm26%{%%k1%}%{z%} \n\t" // 2
 
@@ -298,6 +300,13 @@ void q4f32s_ukernel(
         "vfmadd231ps %%zmm29,%%zmm27,%%zmm23 \n\t" // 7: acc += weights * input
         "vfmadd231ps %%zmm29,%%zmm28,%%zmm24 \n\t" // 8
 
+        // Prefetch to L2?
+        "movq %%rcx,%%r15 \n\t"
+        "addq $8,%%r15 \n\t"
+        "and $127,%%r15 \n\t"
+        "testq $0,%%r15 \n\t"
+        "je .PREFETCHZSL2%= \n\t"
+
         // Maybe Roll Over Zeros and Scales?
         "testq     $0,      %%rcx \n\t"
         "je       .LOOPEPILOQUE%= \n\t"
@@ -378,6 +387,17 @@ void q4f32s_ukernel(
         "vpunpcklbw %%xmm7,%%xmm31,%%xmm7 \n\t"
         "vpunpcklbw %%xmm8,%%xmm25,%%xmm8 \n\t"
 
+        // Prefetch Block for Scales / Zeros
+        ".PREFETCHZSL2%=: \n\t"
+        "prefetcht1 8*4*16(%%rax) \n\t"
+        "prefetcht1 8*4*16*2(%%rax) \n\t"
+        "prefetcht1 8*4*16*3(%%rax) \n\t"
+        "prefetcht1 8*4*16*4(%%rax) \n\t"
+        "prefetcht1 8*4*16*5(%%rax) \n\t"
+        "prefetcht1 8*4*16*6(%%rax) \n\t"
+        "prefetcht1 8*4*16*7(%%rax) \n\t"
+        "prefetcht1 (%%r8, %%r9, 8) \n\t"
+
         ".LOOPEPILOQUE%=:         \n\t"
         "incq     %%rcx           \n\t"
         "testq    %%r12,   %%rcx  \n\t"
@@ -428,17 +448,43 @@ void q4f32s_egemv(
     assert(m % 128 == 0 && "Row size must be divisble by 128");
     assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
 
-#pragma omp parallel for private(j)
-    for (int j = 0; j < m; j += 128) {
-        q4f32s_ukernel_prelude();
-        for (int i = 0; i < n; i += 512) {
-            q4f32s_ukernel(
-                CM(w, j, i / 2, m / 2), m / 2,
-                CM(s, j, i / QBLOCK_SIZE, m), m,
-                CM(z, j, i / QBLOCK_SIZE / 2, m / 2), m / 2,
-                in + i, nullptr,
-                512);
+    auto process_128_rows_n_cols = [&](uint8_t* w, float* s, uint8_t* z,
+                                       float* in, float* out,
+                                       int start_row, int end_row) {
+        //const int n_col_blocks = n / 2048;
+
+        for (int j = start_row; j < end_row; j += 128) {
+            q4f32s_ukernel_prelude();
+            //for (int col_block = 0; col_block < n_col_blocks; col_block++) {
+                //int i = col_block * 2048;
+                q4f32s_ukernel(
+                    //CM(w, j, i / 2, m / 2), m / 2,
+                    w + j, m / 2,
+                    //CM(s, j, i / QBLOCK_SIZE, m), m,
+                    s + j, m,
+                    //CM(z, j, i / QBLOCK_SIZE / 2, m / 2), m / 2,
+                    z + j, m / 2,
+                    in, nullptr,
+                    n);
+            //}
+            q4f32s_ukernel_epiloque(out + j);
         }
-        q4f32s_ukernel_epiloque(out + j);
+    };
+
+    size_t n_threads = 4;
+    std::vector<std::thread> threads(n_threads);
+
+    int rows_per_thread = m / n_threads;
+    assert(rows_per_thread % 128 == 0 && "Thread row blocks size must be divisible by 128");
+    int start_row = 0;
+    int end_row;
+    for (int thread_id = 0; thread_id < n_threads; thread_id++) {
+        end_row = start_row + rows_per_thread;
+        threads[thread_id] = std::thread(process_128_rows_n_cols, w, s, z, in, out, start_row, end_row);
+        start_row += rows_per_thread;
     }
+    for (auto& t : threads) {
+        t.join();
+    }
+    threads.clear();
 }

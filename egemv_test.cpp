@@ -140,7 +140,7 @@ void egemv_test3()
 
     bool passed = true;
     for (int i = 0; i < m; i++) {
-        if (out[i] != 114688.0f) {
+        if (out[i] != 172032.0f) {
             if (i < 50) {
                 std::cout << "Output[" << i << "] = " << out[i] << std::endl;
             }

@@ -153,31 +153,17 @@ void q4f32s_ukernel(
         "vpunpcklbw %%xmm7,%%xmm31,%%xmm7 \n\t"
         "vpunpcklbw %%xmm8,%%xmm25,%%xmm8 \n\t"
 
-        // Set accumulators to zero (zmm9-zmm16)
-        //        "vpxorq %%zmm17,%%zmm17,%%zmm17 \n\t"
-        //        "vpxorq %%zmm18,%%zmm18,%%zmm18 \n\t"
-        //        "vpxorq %%zmm19,%%zmm19,%%zmm19 \n\t"
-        //        "vpxorq %%zmm20,%%zmm20,%%zmm20 \n\t"
-        //        "vpxorq %%zmm21,%%zmm21,%%zmm21 \n\t"
-        //        "vpxorq %%zmm22,%%zmm22,%%zmm22 \n\t"
-        //        "vpxorq %%zmm23,%%zmm23,%%zmm23 \n\t"
-        //        "vpxorq %%zmm24,%%zmm24,%%zmm24 \n\t"
-
         // Main Loop
         "xorq %%rcx,%%rcx \n\t"
         ".MAINLOOP%=:     \n\t"
 
         // Load Input
-        "prefetcht1 16(%%r10) \n\t"
         "vbroadcastss (%%r10),%%zmm29 \n\t"
         "addq $4,%%r10 \n\t" // in += 1 (4 bytes)
 
         // ======= 1 + 2 =======
-        "prefetcht1 (%%rsi, %%rdi, 4) \n\t"
         "vmovdqu8 (%%rsi),%%xmm25%{%%k1%}%{z%}  \n\t" // 1: load 16 weights to lower 64 bits
         "vmovdqu8 8(%%rsi),%%xmm26%{%%k1%}%{z%} \n\t" // 2
-        //"prefetcht0 16(%%rsi) \n\t"
-        //"prefetcht0 24(%%rsi) \n\t"
 
         "vmovdqa64 %%xmm25,%%xmm30 \n\t" // 1: weights --> tmp
         "vmovdqa64 %%xmm26,%%xmm31 \n\t" // 2
@@ -214,8 +200,6 @@ void q4f32s_ukernel(
         // ======= 3 + 4 =======
         "vmovdqu8 16(%%rsi),%%xmm27%{%%k1%}%{z%} \n\t" // 3: load 16 weights to lower 64 bits
         "vmovdqu8 24(%%rsi),%%xmm28%{%%k1%}%{z%} \n\t" // 4
-        //"prefetcht0 32(%%rsi) \n\t"
-        //"prefetcht0 40(%%rsi) \n\t"
 
         "vmovdqa64 %%xmm27,%%xmm30 \n\t" // 3: weights --> tmp
         "vmovdqa64 %%xmm28,%%xmm31 \n\t" // 4
@@ -250,8 +234,6 @@ void q4f32s_ukernel(
         // ======= 5 + 6 =======
         "vmovdqu8 32(%%rsi),%%xmm25%{%%k1%}%{z%} \n\t" // 5
         "vmovdqu8 40(%%rsi),%%xmm26%{%%k1%}%{z%} \n\t" // 6
-        //"prefetcht0 48(%%rsi) \n\t"
-        //"prefetcht0 56(%%rsi) \n\t"
 
         "vmovdqa64 %%xmm25,%%xmm30 \n\t" // 5
         "vmovdqa64 %%xmm26,%%xmm31 \n\t" // 6
@@ -305,8 +287,6 @@ void q4f32s_ukernel(
         ".SEVENEIGHT%=: \n\t"
         "vmovdqu8 48(%%rsi),%%xmm27%{%%k1%}%{z%} \n\t" // 7: load 16 weights to lower 64 bits
         "vmovdqu8 56(%%rsi),%%xmm28%{%%k1%}%{z%} \n\t" // 8
-        //"prefetcht0 (%%rsi, %%rdi) \n\t"
-        //"prefetcht0 8(%%rsi, %%rdi) \n\t"
 
         "leaq (%%rsi,%%rdi),%%rsi \n\t" // weight += weights_cs (32 bytes)
 
@@ -445,16 +425,6 @@ void q4f32s_ukernel(
         "incq     %%rcx           \n\t"
         "testq    %%r12,   %%rcx  \n\t"
         "jne      .MAINLOOP%=     \n\t"
-
-        // Store Outputs
-        //        "vmovups %%zmm17,      (%%r11) \n\t"
-        //        "vmovups %%zmm18,  4*16(%%r11) \n\t"
-        //        "vmovups %%zmm19,4*16*2(%%r11) \n\t"
-        //        "vmovups %%zmm20,4*16*3(%%r11) \n\t"
-        //        "vmovups %%zmm21,4*16*4(%%r11) \n\t"
-        //        "vmovups %%zmm22,4*16*5(%%r11) \n\t"
-        //        "vmovups %%zmm23,4*16*6(%%r11) \n\t"
-        //        "vmovups %%zmm24,4*16*7(%%r11) \n\t"
 
         :
         : "m"(w),

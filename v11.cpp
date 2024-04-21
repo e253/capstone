@@ -1,7 +1,7 @@
 #include "common.hpp"
-#include <immintrin.h>
 #include <cassert>
 #include <cstdint>
+#include <immintrin.h>
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -23,32 +23,31 @@ void q4f32s_ukernel_epiloque(float* ptr)
 {
 }
 
-inline void vpsrld4(__m128i x) {
+inline void vpsrld4(__m128i x)
+{
     asm volatile(
-        "vpsrld $4, %[input], %[output]" 
-        :[output]"+x"(x)
-        :[input]"x"(x)
-        :
-    );
+        "vpsrld $4, %[input], %[output]"
+        : [output] "+x"(x)
+        : [input] "x"(x)
+        :);
 }
 
-inline void cpy(__m128i& dst, __m128i src) {
+inline void cpy(__m128i& dst, __m128i src)
+{
     asm volatile(
         "vmovdqa64 %[src], %[dst]"
-        :[dst]"+x"(dst)
-        :[src]"x"(src)
-        :
-    );
+        : [dst] "+x"(dst)
+        : [src] "x"(src)
+        :);
 }
 
-
 // tmp = _mm_shuffle_epi32(res, _MM_SHUFFLE(0,0,2,2));
-#define UNZIP_U4_TO_U8(ptr, res, tmp, and_mask)    \
-    res = _mm_mask_loadu_epi8(res, 0x00FF, ptr);   \
-    cpy(tmp, res);                                 \
-    vpsrld4(res);                                  \
-    res = _mm_and_si128(res, and_mask);            \
-    tmp = _mm_and_si128(tmp, and_mask);            \
+#define UNZIP_U4_TO_U8(ptr, res, tmp, and_mask)  \
+    res = _mm_mask_loadu_epi8(res, 0x00FF, ptr); \
+    cpy(tmp, res);                               \
+    vpsrld4(res);                                \
+    res = _mm_and_si128(res, and_mask);          \
+    tmp = _mm_and_si128(tmp, and_mask);          \
     res = _mm_unpacklo_epi8(res, tmp)
 
 void q4f32s_ukernel(
@@ -62,38 +61,38 @@ void q4f32s_ukernel(
     float* out, // out, offset from the global pointer
     uint64_t cols)
 {
-// 8 * 16 element blocks of columns. We load the inputs once
-//        and_mask = xmm0
-//        zeros = xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7, xmm8
-//        scales = zmm9, zmm10, zmm11, zmm12, zmm13, zmm14, zmm15, zmm16
-//        accs = zmm17, zmm18, zmm19, zmm20, zmm21, zmm22, zmm23, zmm24
-//        weights = zmm25, zmm26, zmm27, zmm28
-//        tmp = xmm30, xmm31
-//        input = zmm29
-//        Col 1: (block 0)
-//           Tmp: xmm30
-//           Weights: zmm25
-//        Col 2: (block 1)
-//           Tmp: xmm31
-//           Weights: zmm26
-//        Col 3: (block 2)
-//            Tmp: xmm30
-//            Weights: zmm27
-//        Col 4: (block 3)
-//            Tmp: xmm31
-//            Weights: zmm28
-//        Col 5: (block 0)
-//            Tmp: xmm30
-//            Weights: zmm25
-//        Col 6: (block 1)
-//            Tmp: xmm31
-//            Weights: zmm26
-//        Col 7: (block 2)
-//            Tmp: xmm30
-//            Weights: zmm27
-//        Col 8: (block 3)
-//            Tmp: xmm31
-//            Weights: zmm28
+    // 8 * 16 element blocks of columns. We load the inputs once
+    //        and_mask = xmm0
+    //        zeros = xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7, xmm8
+    //        scales = zmm9, zmm10, zmm11, zmm12, zmm13, zmm14, zmm15, zmm16
+    //        accs = zmm17, zmm18, zmm19, zmm20, zmm21, zmm22, zmm23, zmm24
+    //        weights = zmm25, zmm26, zmm27, zmm28
+    //        tmp = xmm30, xmm31
+    //        input = zmm29
+    //        Col 1: (block 0)
+    //           Tmp: xmm30
+    //           Weights: zmm25
+    //        Col 2: (block 1)
+    //           Tmp: xmm31
+    //           Weights: zmm26
+    //        Col 3: (block 2)
+    //            Tmp: xmm30
+    //            Weights: zmm27
+    //        Col 4: (block 3)
+    //            Tmp: xmm31
+    //            Weights: zmm28
+    //        Col 5: (block 0)
+    //            Tmp: xmm30
+    //            Weights: zmm25
+    //        Col 6: (block 1)
+    //            Tmp: xmm31
+    //            Weights: zmm26
+    //        Col 7: (block 2)
+    //            Tmp: xmm30
+    //            Weights: zmm27
+    //        Col 8: (block 3)
+    //            Tmp: xmm31
+    //            Weights: zmm28
 
     // and mask
     __m128i xmm0 = _mm_set1_epi8(0x0F);
@@ -143,37 +142,36 @@ void q4f32s_ukernel(
     __m128i xmm30;
     __m128i xmm31;
 
-
     // Initialize zeros
-    UNZIP_U4_TO_U8(zeros,    xmm1, xmm30, xmm0);
-    UNZIP_U4_TO_U8(zeros+8,  xmm2, xmm31, xmm0);
-    UNZIP_U4_TO_U8(zeros+16, xmm3, xmm30, xmm0);
-    UNZIP_U4_TO_U8(zeros+24, xmm4, xmm31, xmm0);
-    UNZIP_U4_TO_U8(zeros+32, xmm5, xmm30, xmm0);
-    UNZIP_U4_TO_U8(zeros+40, xmm6, xmm31, xmm0);
-    UNZIP_U4_TO_U8(zeros+48, xmm7, xmm30, xmm0);
-    UNZIP_U4_TO_U8(zeros+56, xmm8, xmm31, xmm0);
+    UNZIP_U4_TO_U8(zeros, xmm1, xmm30, xmm0);
+    UNZIP_U4_TO_U8(zeros + 8, xmm2, xmm31, xmm0);
+    UNZIP_U4_TO_U8(zeros + 16, xmm3, xmm30, xmm0);
+    UNZIP_U4_TO_U8(zeros + 24, xmm4, xmm31, xmm0);
+    UNZIP_U4_TO_U8(zeros + 32, xmm5, xmm30, xmm0);
+    UNZIP_U4_TO_U8(zeros + 40, xmm6, xmm31, xmm0);
+    UNZIP_U4_TO_U8(zeros + 48, xmm7, xmm30, xmm0);
+    UNZIP_U4_TO_U8(zeros + 56, xmm8, xmm31, xmm0);
     zeros += zeros_cs;
 
     // Initialize scales
-    zmm9  = _mm512_loadu_ps(scales +   0);
-    zmm10 = _mm512_loadu_ps(scales +  16);
-    zmm11 = _mm512_loadu_ps(scales +  32);
-    zmm12 = _mm512_loadu_ps(scales +  48);
-    zmm13 = _mm512_loadu_ps(scales +  64);
-    zmm14 = _mm512_loadu_ps(scales +  80);
-    zmm15 = _mm512_loadu_ps(scales +  96);
+    zmm9 = _mm512_loadu_ps(scales + 0);
+    zmm10 = _mm512_loadu_ps(scales + 16);
+    zmm11 = _mm512_loadu_ps(scales + 32);
+    zmm12 = _mm512_loadu_ps(scales + 48);
+    zmm13 = _mm512_loadu_ps(scales + 64);
+    zmm14 = _mm512_loadu_ps(scales + 80);
+    zmm15 = _mm512_loadu_ps(scales + 96);
     zmm16 = _mm512_loadu_ps(scales + 112);
     scales += scales_cs;
 
-    // Initialize accumulators 
-    zmm17 = _mm512_loadu_ps(out +   0);
-    zmm18 = _mm512_loadu_ps(out +  16);
-    zmm19 = _mm512_loadu_ps(out +  32);
-    zmm20 = _mm512_loadu_ps(out +  48);
-    zmm21 = _mm512_loadu_ps(out +  64);
-    zmm22 = _mm512_loadu_ps(out +  80);
-    zmm23 = _mm512_loadu_ps(out +  96);
+    // Initialize accumulators
+    zmm17 = _mm512_loadu_ps(out + 0);
+    zmm18 = _mm512_loadu_ps(out + 16);
+    zmm19 = _mm512_loadu_ps(out + 32);
+    zmm20 = _mm512_loadu_ps(out + 48);
+    zmm21 = _mm512_loadu_ps(out + 64);
+    zmm22 = _mm512_loadu_ps(out + 80);
+    zmm23 = _mm512_loadu_ps(out + 96);
     zmm24 = _mm512_loadu_ps(out + 112);
 
     for (int col = 0; col < cols; col++) {
@@ -253,8 +251,8 @@ void q4f32s_ukernel(
 
         if (((col & QBLOCK_SIZE) == 0) && (col != 0)) {
             // Zeros
-            UNZIP_U4_TO_U8(zeros,      xmm1, xmm30, xmm0);
-            UNZIP_U4_TO_U8(zeros +  8, xmm2, xmm31, xmm0);
+            UNZIP_U4_TO_U8(zeros, xmm1, xmm30, xmm0);
+            UNZIP_U4_TO_U8(zeros + 8, xmm2, xmm31, xmm0);
             UNZIP_U4_TO_U8(zeros + 16, xmm3, xmm30, xmm0);
             UNZIP_U4_TO_U8(zeros + 24, xmm4, xmm31, xmm0);
             UNZIP_U4_TO_U8(zeros + 32, xmm5, xmm30, xmm0);
@@ -264,20 +262,20 @@ void q4f32s_ukernel(
             zeros += zeros_cs;
 
             // Scales
-            zmm9 =  _mm512_loadu_ps(scales +   0);
-            zmm10 = _mm512_loadu_ps(scales +  16);
-            zmm11 = _mm512_loadu_ps(scales +  32);
-            zmm12 = _mm512_loadu_ps(scales +  48);
-            zmm13 = _mm512_loadu_ps(scales +  64);
-            zmm14 = _mm512_loadu_ps(scales +  80);
-            zmm15 = _mm512_loadu_ps(scales +  96);
+            zmm9 = _mm512_loadu_ps(scales + 0);
+            zmm10 = _mm512_loadu_ps(scales + 16);
+            zmm11 = _mm512_loadu_ps(scales + 32);
+            zmm12 = _mm512_loadu_ps(scales + 48);
+            zmm13 = _mm512_loadu_ps(scales + 64);
+            zmm14 = _mm512_loadu_ps(scales + 80);
+            zmm15 = _mm512_loadu_ps(scales + 96);
             zmm16 = _mm512_loadu_ps(scales + 112);
             scales += scales_cs;
         }
     }
 
     // Store Results
-    _mm512_storeu_ps(out,      zmm17);
+    _mm512_storeu_ps(out, zmm17);
     _mm512_storeu_ps(out + 16, zmm18);
     _mm512_storeu_ps(out + 32, zmm19);
     _mm512_storeu_ps(out + 48, zmm20);

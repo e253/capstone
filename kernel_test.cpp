@@ -101,7 +101,7 @@ void kernel_test2()
 
     bool passed = true;
     for (int i = 0; i < m; i++) {
-        if (Output[i] != 4096.0f) {
+        if (Output[i] != 6144.0f) {
             std::cout << "Output[" << i << "] = " << Output[i] << std::endl;
             passed = false;
         }
@@ -171,7 +171,7 @@ void kernel_test3()
 
     bool passed = true;
     for (int i = 0; i < m; i++) {
-        if (Output[i] != 3072.0f) {
+        if (Output[i] != 4608.0f) {
             std::cout << "Output[" << i << "] = " << Output[i] << std::endl;
             passed = false;
         }

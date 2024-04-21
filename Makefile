@@ -8,7 +8,7 @@ egtest%.exe: egemv_test.cpp common.o v%.o
 
 bench: bench10.exe bench9.exe bench8.exe bench7.exe
 run_bench: bench
-	./bench10.exe && sleep 1 && ./bench9.exe && sleep 1 && ./bench8.exe && sleep 1 && ./bench7.exe
+	./bench10.exe && sleep 5 && ./bench9.exe && sleep 5 && ./bench8.exe && sleep 5 && ./bench7.exe
 
 bench%.exe: egemv_bench.cpp common.o v%.o
 	g++ -march=native -O3 -DVER=$* egemv_bench.cpp common.o v$*.o -o $@ -lpthread

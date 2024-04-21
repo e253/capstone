@@ -4,7 +4,9 @@
 #include <iostream>
 #include <thread>
 #include <vector>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <pthread.h>
 #endif
 
@@ -457,7 +459,6 @@ void q4f32s_egemv(
     float* out,
     int m, int n)
 {
-
     assert(m % 128 == 0 && "Row size must be divisble by 128");
     assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
 
@@ -465,20 +466,18 @@ void q4f32s_egemv(
                                        float* in, float* out,
                                        int m, int n,
                                        int start_row, int end_row,
-                                       vector<thread>& threads, int thread_id) {
-        /*
-        #ifndef _WIN32
-                // https://eli.thegreenplace.net/2016/c11-threads-affinity-and-hyperthreading/
-                cpu_set_t cpuset;
-                CPU_ZERO(&cpuset);
-                CPU_SET(thread_id, &cpuset);
-                int rc = pthread_setaffinity_np(threads[thread_id].native_handle(), sizeof(cpu_set_t), &cpuset);
-                if (rc != 0) {
-                    cerr << "Error calling pthread_setaffinity_np: " << rc << endl;
-                    exit(0);
-                }
-        #endif
-        */
+                                       int thread_id) {
+#ifdef _WIN32
+// Doesn't seem to be helpful
+        HANDLE hThread = GetCurrentThread();
+        DWORD_PTR mask = 1 << (thread_id * 2);
+        DWORD_PTR result = SetThreadAffinityMask(hThread, mask);
+        if (result == 0) {
+            cerr << "Error calling SetThreadAffinityMask: " << GetLastError() << endl;
+            exit(0);
+        }
+#endif
+
         const int n_col_blocks = n / 2048;
 
         for (int j = start_row; j < end_row; j += 128) {
@@ -498,14 +497,28 @@ void q4f32s_egemv(
 
     size_t n_threads = 4;
     vector<thread> threads(n_threads);
+#ifndef _WIN32
+    cpu_set_t cpuset;
+#endif
 
     int rows_per_thread = m / n_threads;
     assert(rows_per_thread % 128 == 0 && "Thread row blocks size must be divisible by 128");
     int start_row = 0;
     int end_row;
+
     for (int thread_id = 0; thread_id < n_threads; thread_id++) {
         end_row = start_row + rows_per_thread;
-        threads[thread_id] = thread(process_128_rows_n_cols, w, s, z, in, out, m, n, start_row, end_row, std::ref(threads), thread_id);
+        threads[thread_id] = thread(process_128_rows_n_cols, w, s, z, in, out, m, n, start_row, end_row, thread_id);
+#ifndef _WIN32
+        // https://eli.thegreenplace.net/2016/c11-threads-affinity-and-hyperthreading/
+        CPU_ZERO(&cpuset);
+        CPU_SET(thread_id, &cpuset);
+        int rc = pthread_setaffinity_np(threads[thread_id].native_handle(), sizeof(cpu_set_t), &cpuset);
+        if (rc != 0) {
+            cerr << "Error calling pthread_setaffinity_np: " << rc << endl;
+            exit(0);
+        }
+#endif
         start_row += rows_per_thread;
     }
     for (auto& t : threads) {

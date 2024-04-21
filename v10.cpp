@@ -69,6 +69,9 @@ void q4f32s_ukernel(
         "movq      %8,      %%r12    \n\t" // cols
         "decq      %%r12             \n\t" // cols -= 1
 
+        // 0 r14, important for later
+        "xorq      %%r14,   %%r14    \n\t"
+
         // Set load mask (k1)
         "movl     $0x00FF,  %%r13d   \n\t"
         "kmovw    %%r13d,   %%k1     \n\t"
@@ -165,14 +168,16 @@ void q4f32s_ukernel(
         ".MAINLOOP%=:     \n\t"
 
         // Load Input
-        "prefetcht0 8(%%r10) \n\t"
+        "prefetcht1 16(%%r10) \n\t"
         "vbroadcastss (%%r10),%%zmm29 \n\t"
         "addq $4,%%r10 \n\t" // in += 1 (4 bytes)
 
         // ======= 1 + 2 =======
-        "prefetcht0 (%%rsi, %%rdi, 2) \n\t"
+        "prefetcht1 (%%rsi, %%rdi, 4) \n\t"
         "vmovdqu8 (%%rsi),%%xmm25%{%%k1%}%{z%}  \n\t" // 1: load 16 weights to lower 64 bits
         "vmovdqu8 8(%%rsi),%%xmm26%{%%k1%}%{z%} \n\t" // 2
+        //"prefetcht0 16(%%rsi) \n\t"
+        //"prefetcht0 24(%%rsi) \n\t"
 
         "vmovdqa64 %%xmm25,%%xmm30 \n\t" // 1: weights --> tmp
         "vmovdqa64 %%xmm26,%%xmm31 \n\t" // 2
@@ -209,6 +214,8 @@ void q4f32s_ukernel(
         // ======= 3 + 4 =======
         "vmovdqu8 16(%%rsi),%%xmm27%{%%k1%}%{z%} \n\t" // 3: load 16 weights to lower 64 bits
         "vmovdqu8 24(%%rsi),%%xmm28%{%%k1%}%{z%} \n\t" // 4
+        //"prefetcht0 32(%%rsi) \n\t"
+        //"prefetcht0 40(%%rsi) \n\t"
 
         "vmovdqa64 %%xmm27,%%xmm30 \n\t" // 3: weights --> tmp
         "vmovdqa64 %%xmm28,%%xmm31 \n\t" // 4
@@ -243,6 +250,8 @@ void q4f32s_ukernel(
         // ======= 5 + 6 =======
         "vmovdqu8 32(%%rsi),%%xmm25%{%%k1%}%{z%} \n\t" // 5
         "vmovdqu8 40(%%rsi),%%xmm26%{%%k1%}%{z%} \n\t" // 6
+        //"prefetcht0 48(%%rsi) \n\t"
+        //"prefetcht0 56(%%rsi) \n\t"
 
         "vmovdqa64 %%xmm25,%%xmm30 \n\t" // 5
         "vmovdqa64 %%xmm26,%%xmm31 \n\t" // 6
@@ -265,8 +274,6 @@ void q4f32s_ukernel(
         "vpmovsxbd %%xmm25,%%zmm25 \n\t" // 5
         "vpmovsxbd %%xmm26,%%zmm26 \n\t" // 6
 
-        // "prefetcht0 (%%rsi) \n\t" // 7 + 8 prefetch
-
         "vcvtdq2ps %%zmm25,%%zmm25 \n\t" // 5
         "vcvtdq2ps %%zmm26,%%zmm26 \n\t" // 6
 
@@ -276,9 +283,31 @@ void q4f32s_ukernel(
         "vfmadd231ps %%zmm29,%%zmm25,%%zmm21 \n\t" // 5
         "vfmadd231ps %%zmm29,%%zmm26,%%zmm22 \n\t" // 6
 
+        // Prefetch Scales and Weights to L1
+        "testq     $0,     %%rcx  \n\t"
+        "je  .SEVENEIGHT%=        \n\t"
+        "movq     %%rcx,   %%r15  \n\t"
+        "andq     $127,    %%r15  \n\t" // & 127 is equivalent to % 128, but faster
+        "testq    $0,      %%r15  \n\t"
+        "jne .SEVENEIGHT%=        \n\t"
+        
+        "prefetcht0 (%%rax) \n\t"
+        "prefetcht0 512(%%rax) \n\t"
+        "prefetcht0 512*2(%%rax) \n\t"
+        "prefetcht0 512*3(%%rax) \n\t"
+        "prefetcht0 512*4(%%rax) \n\t"
+        "prefetcht0 512*5(%%rax) \n\t"
+        "prefetcht0 512*6(%%rax) \n\t"
+        "prefetcht0 512*7(%%rax) \n\t"
+        "prefetcht0 (%%r8) \n\t"
+
+
         // ======= 7 + 8 =======
+        ".SEVENEIGHT%=: \n\t"
         "vmovdqu8 48(%%rsi),%%xmm27%{%%k1%}%{z%} \n\t" // 7: load 16 weights to lower 64 bits
         "vmovdqu8 56(%%rsi),%%xmm28%{%%k1%}%{z%} \n\t" // 8
+        //"prefetcht0 (%%rsi, %%rdi) \n\t"
+        //"prefetcht0 8(%%rsi, %%rdi) \n\t"
 
         "leaq (%%rsi,%%rdi),%%rsi \n\t" // weight += weights_cs (32 bytes)
 
@@ -313,16 +342,16 @@ void q4f32s_ukernel(
         "vfmadd231ps %%zmm29,%%zmm28,%%zmm24 \n\t" // 8
 
         // We need to roll over zeros and scales every 128 values
-        // For performance, we prefetch the values 2 iterations before
+        // For performance, we prefetch the values --> L3 8 iterations before --> L1 right before ^
         "testq     $0,      %%rcx \n\t"
         "je       .LOOPEPILOQUE%= \n\t" // on the first iteration, we don't need to roll over even through rcx % 128 == 0
         "movq      %%rcx,   %%r15 \n\t"
         "and       $127,    %%r15 \n\t" // & 127 is equivalent to % 128, but faster
         "testq     $0,      %%r15 \n\t"
-        "jne      .PREFETCHZS%=   \n\t" // Not time to rollover, but we might want to prefetch
+        "jne      .PREFETCHZSL2%=   \n\t" // Not time to rollover, but we might want to prefetch to L3
 
         // Scales
-        "vmovups (%%rax),%%zmm9        \n\t"
+        "vmovups (%%rax),%%zmm9       \n\t"
         "vmovups 512(%%rax),%%zmm10   \n\t"
         "vmovups 512*2(%%rax),%%zmm11 \n\t"
         "vmovups 512*3(%%rax),%%zmm12 \n\t"
@@ -396,22 +425,22 @@ void q4f32s_ukernel(
         "jmp .LOOPEPILOQUE%= \n\t" // We don't want to prefetch, since we just rolled over
 
         // Scales / Zeros Prefetch Block
-        ".PREFETCHZS%=: \n\t"
+        ".PREFETCHZSL2%=: \n\t"
         "movq %%rcx,%%r15 \n\t"
-        "addq $4,%%r15 \n\t"
+        "addq $8,%%r15 \n\t"
         "and $127,%%r15 \n\t"
         "testq $0,%%r15 \n\t"
         "jne .LOOPEPILOQUE%= \n\t"
 
-        "prefetcht0 (%%rax) \n\t"
-        "prefetcht0 512(%%rax) \n\t"
-        "prefetcht0 512*2(%%rax) \n\t"
-        "prefetcht0 512*3(%%rax) \n\t"
-        "prefetcht0 512*4(%%rax) \n\t"
-        "prefetcht0 512*5(%%rax) \n\t"
-        "prefetcht0 512*6(%%rax) \n\t"
-        "prefetcht0 512*7(%%rax) \n\t"
-        "prefetcht0 (%%r8) \n\t"
+        "prefetcht1 (%%rax) \n\t"
+        "prefetcht1 512(%%rax) \n\t"
+        "prefetcht1 512*2(%%rax) \n\t"
+        "prefetcht1 512*3(%%rax) \n\t"
+        "prefetcht1 512*4(%%rax) \n\t"
+        "prefetcht1 512*5(%%rax) \n\t"
+        "prefetcht1 512*6(%%rax) \n\t"
+        "prefetcht1 512*7(%%rax) \n\t"
+        "prefetcht1 (%%r8) \n\t"
 
         ".LOOPEPILOQUE%=:         \n\t"
         "incq     %%rcx           \n\t"
@@ -461,6 +490,7 @@ void q4f32s_egemv(
 {
     assert(m % 128 == 0 && "Row size must be divisble by 128");
     assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
+    //std::mutex mtx;
 
     auto process_128_rows_n_cols = [&](uint8_t* w, float* s, uint8_t* z,
                                        float* in, float* out,
@@ -484,6 +514,13 @@ void q4f32s_egemv(
             q4f32s_ukernel_prelude();
             for (int col_block = 0; col_block < n_col_blocks; col_block++) {
                 int i = col_block * 2048;
+                /*mtx.lock();
+                cout << "i: " << i << ", j: " << j;
+                cout << ", W: " << CM(0, j, i / 2, m / 2);
+                cout << ", S: " << CM(0, j, i / QBLOCK_SIZE, m);
+                cout << ", Z: " << CM(0, j, i / QBLOCK_SIZE / 2, m / 2);
+                cout << endl;
+                mtx.unlock(); */
                 q4f32s_ukernel(
                     CM(w, j, i / 2, m / 2), m / 2,
                     CM(s, j, i / QBLOCK_SIZE, m), m,

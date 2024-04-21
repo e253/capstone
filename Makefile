@@ -4,7 +4,7 @@ ktest%.exe: kernel_test.cpp common.cpp v%.cpp
 	g++ -march=native -g -DKERNEL_VER=$* kernel_test.cpp common.cpp v$*.cpp -o $@
 
 egtest%.exe: egemv_test.cpp common.cpp v%.cpp
-	g++ -march=native -g -DVER=$* egemv_test.cpp common.cpp v$*.cpp -o $@
+	g++ -march=native -g -DVER=$* egemv_test.cpp common.cpp -std=c++20 v$*.cpp -o $@
 
 bench: bench11.exe bench10.exe bench9.exe bench8.exe bench7.exe
 run_bench: bench

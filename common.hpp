@@ -6,6 +6,7 @@
 // column major indexing helper
 #define CM(ptr, row, col, col_stride) ((ptr) + (col * (col_stride)) + (row))
 
+extern "C" {
 // Call before using the ukernel
 void q4f32s_ukernel_prelude();
 // Call after using the ukernel to put result in ptr.
@@ -32,3 +33,4 @@ void q4f32s_egemv(
 
 void* _alloc(std::size_t size, std::size_t alignment);
 void _free(void* ptr);
+}

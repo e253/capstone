@@ -165,7 +165,7 @@ void q4f32s_ukernel(
         ".MAINLOOP%=:     \n\t"
 
         // Load Input
-        //"prefetcht0 8(%%r10) \n\t"
+        "prefetcht0 8(%%r10) \n\t"
         "vbroadcastss (%%r10),%%zmm29 \n\t"
         "addq $4,%%r10 \n\t" // in += 1 (4 bytes)
 
@@ -398,7 +398,7 @@ void q4f32s_ukernel(
         // Scales / Zeros Prefetch Block
         ".PREFETCHZS%=: \n\t"
         "movq %%rcx,%%r15 \n\t"
-        "addq $3,%%r15 \n\t"
+        "addq $4,%%r15 \n\t"
         "and $127,%%r15 \n\t"
         "testq $0,%%r15 \n\t"
         "jne .LOOPEPILOQUE%= \n\t"
@@ -468,7 +468,7 @@ void q4f32s_egemv(
                                        int start_row, int end_row,
                                        int thread_id) {
 #ifdef _WIN32
-// Doesn't seem to be helpful
+        // Doesn't seem to be helpful
         HANDLE hThread = GetCurrentThread();
         DWORD_PTR mask = 1 << (thread_id * 2);
         DWORD_PTR result = SetThreadAffinityMask(hThread, mask);

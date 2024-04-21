@@ -34,16 +34,21 @@ void egemv_test1()
         m, n);
 
     bool passed = true;
+    int printed = 0;
+    int num_off = 0;
     for (int i = 0; i < m; i++) {
         if (out[i] != 229376.0f) {
-            if (i < 50) {
+            if (printed < 50) {
                 std::cout << "Output[" << i << "] = " << out[i] << std::endl;
+                printed++;
             }
+            num_off++;
             passed = false;
         }
     }
     if (!passed) {
         std::cout << "Egemv Test 1 Failed" << std::endl;
+        std::cout << "Number of Offenders: " << num_off << std::endl;
         exit(0);
     } else {
         std::cout << "Egemv Test 1 Passed" << std::endl;

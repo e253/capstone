@@ -32,7 +32,7 @@ void kernel_test1()
         W_Scales, m,
         W_Zeros, m / 2,
         Input,
-        nullptr,
+        Output,
         n);
     q4f32s_ukernel_epiloque(Output);
 
@@ -95,7 +95,7 @@ void kernel_test2()
         W_Scales, m,
         W_Zeros, m / 2,
         Input,
-        nullptr,
+        Output,
         n);
     q4f32s_ukernel_epiloque(Output);
 
@@ -165,7 +165,7 @@ void kernel_test3()
         W_Scales, m,
         W_Zeros, m / 2,
         Input,
-        nullptr,
+        Output,
         n);
     q4f32s_ukernel_epiloque(Output);
 
@@ -231,7 +231,7 @@ void kernel_test4()
         W_Scales, m,
         W_Zeros, m / 2,
         Input,
-        nullptr,
+        Output,
         n);
     q4f32s_ukernel_epiloque(Output);
 
@@ -302,7 +302,7 @@ void kernel_test5()
         W_Scales, m,
         W_Zeros, m / 2,
         Input,
-        nullptr,
+        Output,
         n);
     q4f32s_ukernel_epiloque(Output);
 
@@ -373,7 +373,7 @@ void kernel_test6()
         W_Scales, m,
         W_Zeros, m / 2,
         Input,
-        nullptr,
+        Output,
         n);
     q4f32s_ukernel_epiloque(Output);
 
@@ -446,7 +446,7 @@ void kernel_test7()
         W_Scales + 256, m,
         W_Zeros + 256 / 2, m / 2,
         Input,
-        nullptr,
+        Output + 256,
         n);
     q4f32s_ukernel_epiloque(Output + 256);
 

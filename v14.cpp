@@ -55,8 +55,8 @@ void q4f32s_128x128_ukernel(
     float* in,
     float* out)
 {
-    // and mask
-    __m128i and_mask = _mm_set1_epi8(0x0F);
+// and mask
+#define and_mask _mm_set1_epi8(0x0F)
 
     __m128i tmp; // compiler will create many regs for this
     for (int row = 0; row < 128; row += 4) {

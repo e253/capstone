@@ -3,6 +3,9 @@
 ktest%.exe: kernel_test.cpp common.cpp v%.cpp
 	g++ -march=native -g -DKERNEL_VER=$* kernel_test.cpp common.cpp v$*.cpp -o $@
 
+rmktest%.exe: kernel_test.cpp common.cpp v%.cpp
+	g++ -march=native -g -DKERNEL_VER=$* kernel_test_rm.cpp common.cpp v$*.cpp -o $@
+
 egtest%.exe: egemv_test.cpp common.cpp v%.cpp
 	g++ -march=native -g -DVER=$* egemv_test.cpp common.cpp -std=c++20 v$*.cpp -o $@
 

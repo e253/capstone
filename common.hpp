@@ -23,6 +23,16 @@ void q4f32s_ukernel(
     float* out, // out, offset from the global pointer
     uint64_t cols);
 
+void q4f32s_128x128_ukernel(
+    uint8_t* w,
+    uint64_t w_rs,
+    float* scales, // f16
+    uint64_t scales_rs,
+    uint8_t* zeros,
+    uint64_t zeros_cs,
+    float* in,
+    float* out);
+
 void q4f32s_egemv(
     uint8_t* w,
     float* s,

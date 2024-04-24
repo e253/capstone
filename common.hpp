@@ -31,6 +31,15 @@ void q4f32s_128x128_ukernel(
     float* in,
     float* out);
 
+void q4f32s_q8in_128x128_ukernerl(
+    uint8_t* w,
+    uint64_t w_rs,
+    float* scales,
+    uint8_t* zeros,
+    uint64_t zeros_cs,
+    int8_t* in,
+    float* out);
+
 void q4f32s_egemv(
     uint8_t* w,
     float* s,

@@ -40,7 +40,7 @@ inline __m512i load_weights(const uint8_t* w)
 
 #ifdef I32ACCUM
 typedef __m512i acc_t;
-#define REDUCE_ADD(acc) _mm512_reduce_add_epi32((acc))
+#define REDUCE_ADD(acc) _mm512_reduce_add_ps(_mm512_cvepi32_ps(acc))
 #else
 typedef __m512 acc_t;
 #define REDUCE_ADD(acc) _mm512_reduce_add_ps((acc))
@@ -53,12 +53,14 @@ inline void mul_input_weight_accum(__m512i input, __m512i weight, __m512i zero, 
     input(i8) * (weights (u8) - zeros (u8)) == weights(u8)*input(i8) - zeros(u8)*input(i8)
     Signed muliplications are possible, but only with ymm registers, for some reason.
     */
+
+#ifdef I32ACCUM
+    __m512i tmp1 = _mm512_dpbusds_epi32(acc, weight, input);
+    __m512i tmp2 = _mm512_dpbusds_epi32(acc, zero, input);
+#else
     __m512i tmp1 = _mm512_dpbusds_epi32(_mm512_setzero_epi32(), weight, input);
     __m512i tmp2 = _mm512_dpbusds_epi32(_mm512_setzero_epi32(), zero, input);
-    __m512i tmp1 = _mm512_sub_epi32(tmp1, tmp2);
-#ifdef I32ACCUM
-    acc = _mm512_add_epi32(acc, tmp1);
-#else
+    tmp1 = _mm512_sub_epi32(tmp1, tmp2);
     acc = _mm512_add_ps(acc, _mm512_cvtepi32_ps(tmp1));
 #endif
 }
@@ -110,7 +112,7 @@ void q4f32s_qi8f32s_128x128_ukernel(
             mul_input_weight_accum(input, weight2, zero2, acc2);
         }
 
-        // Store Results
+        // Store Results -- Inefficient. I may be able to do better with an inline function
         out[row] += REDUCE_ADD(acc1) * scales[row] * in_scales[row];
         out[row + 1] += REDUCE_ADD(acc2) * scales[row + 1] * in_scales[row + 1];
     }

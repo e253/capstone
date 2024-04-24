@@ -22,18 +22,21 @@ void q4f32s_ukernel_epiloque(float* ptr)
 {
 }
 
-#define UNZIP_U4_TO_U8(res, tmp, and_mask)                 \
-    tmp = _mm_shuffle_epi32(res, _MM_SHUFFLE(3, 2, 0, 1)); \
-    res = _mm_srli_si128(res, 4);                          \
-    res = _mm_and_si128(res, and_mask);                    \
-    tmp = _mm_and_si128(tmp, and_mask);                    \
-    res = _mm_unpacklo_epi8(res, tmp)
+#define UNZIP_U4_TO_U8(res, tmp, and_mask)                                \
+    tmp = _mm_shuffle_epi32(AVXPS_TO_SSEI(res), _MM_SHUFFLE(3, 2, 0, 1)); \
+    res = SSEI_TO_AVXPS(_mm_srli_si128(AVXPS_TO_SSEI(res), 4));           \
+    res = SSEI_TO_AVXPS(_mm_and_si128(AVXPS_TO_SSEI(res), and_mask));     \
+    tmp = _mm_and_si128(tmp, and_mask);                                   \
+    res = SSEI_TO_AVXPS(_mm_unpacklo_epi8(AVXPS_TO_SSEI(res), tmp))
 
-#define INFLATE_WEIGHTS(w, w_i32, w_f32, zeros) \
-    w = _mm_sub_epi8(w, zeros);                 \
-    __m512i w_i32 = _mm512_cvtepi8_epi32(w);    \
-    __m512 w_f32 = _mm512_cvtepi32_ps(w_i32)
-// w_f32 = _mm512_mul_ps(scales, w_f32)
+// 128i casted to 512
+#define SSEI_TO_AVXPS(reg) _mm512_castps128_ps512(_mm_castsi128_ps(reg))
+#define AVXPS_TO_SSEI(reg) _mm_castps_si128(_mm512_castps512_ps128(reg))
+
+#define INFLATE_WEIGHTS(w, zeros)                                    \
+    w = SSEI_TO_AVXPS(_mm_sub_epi8(AVXPS_TO_SSEI(w), zeros));        \
+    w = _mm512_castsi512_ps(_mm512_cvtepi8_epi32(AVXPS_TO_SSEI(w))); \
+    w = _mm512_cvtepi32_ps(_mm512_castps_si512(w));
 
 /*
 w, Weight, offset from the global pointer
@@ -64,7 +67,7 @@ void q4f32s_128x128_ukernel(
         __m512 acc3 = _mm512_setzero_ps();
         __m512 acc4 = _mm512_setzero_ps();
 
-        // Choose Zeros --> TODO! Fix. Incorrect
+        // Choose Zeros
         uint8_t zero12 = zeros[row / 2];
         uint8_t zero34 = zeros[row / 2 + 1];
         __m128i zero2 = _mm_set1_epi8(zero12 & 0x0F);
@@ -78,14 +81,14 @@ void q4f32s_128x128_ukernel(
             __m512 input2 = _mm512_loadu_ps(in + col + 16);
 
             // load weights
-            __m128i weight1 = _mm_loadu_epi8(w + col / 2 + row * w_rs);
-            __m128i weight2 = _mm_shuffle_epi32(weight1, _MM_SHUFFLE(3, 2, 3, 2));
-            __m128i weight3 = _mm_loadu_epi8(w + col / 2 + (row + 1) * w_rs);
-            __m128i weight4 = _mm_shuffle_epi32(weight3, _MM_SHUFFLE(3, 2, 3, 2));
-            __m128i weight5 = _mm_loadu_epi8(w + col / 2 + (row + 2) * w_rs);
-            __m128i weight6 = _mm_shuffle_epi32(weight5, _MM_SHUFFLE(3, 2, 3, 2));
-            __m128i weight7 = _mm_loadu_epi8(w + col / 2 + (row + 3) * w_rs);
-            __m128i weight8 = _mm_shuffle_epi32(weight7, _MM_SHUFFLE(3, 2, 3, 2));
+            __m512 weight1 = SSEI_TO_AVXPS(_mm_loadu_epi8(w + col / 2 + row * w_rs));
+            __m512 weight2 = SSEI_TO_AVXPS(_mm_shuffle_epi32(AVXPS_TO_SSEI(weight1), _MM_SHUFFLE(3, 2, 3, 2)));
+            __m512 weight3 = SSEI_TO_AVXPS(_mm_loadu_epi8(w + col / 2 + (row + 1) * w_rs));
+            __m512 weight4 = SSEI_TO_AVXPS(_mm_shuffle_epi32(AVXPS_TO_SSEI(weight3), _MM_SHUFFLE(3, 2, 3, 2)));
+            __m512 weight5 = SSEI_TO_AVXPS(_mm_loadu_epi8(w + col / 2 + (row + 2) * w_rs));
+            __m512 weight6 = SSEI_TO_AVXPS(_mm_shuffle_epi32(AVXPS_TO_SSEI(weight5), _MM_SHUFFLE(3, 2, 3, 2)));
+            __m512 weight7 = SSEI_TO_AVXPS(_mm_loadu_epi8(w + col / 2 + (row + 3) * w_rs));
+            __m512 weight8 = SSEI_TO_AVXPS(_mm_shuffle_epi32(AVXPS_TO_SSEI(weight7), _MM_SHUFFLE(3, 2, 3, 2)));
             UNZIP_U4_TO_U8(weight1, tmp, and_mask);
             UNZIP_U4_TO_U8(weight2, tmp, and_mask);
             UNZIP_U4_TO_U8(weight3, tmp, and_mask);
@@ -94,27 +97,27 @@ void q4f32s_128x128_ukernel(
             UNZIP_U4_TO_U8(weight6, tmp, and_mask);
             UNZIP_U4_TO_U8(weight7, tmp, and_mask);
             UNZIP_U4_TO_U8(weight8, tmp, and_mask);
-            INFLATE_WEIGHTS(weight1, w1_i32, w1_f32, zero1);
-            INFLATE_WEIGHTS(weight2, w2_i32, w2_f32, zero1);
-            INFLATE_WEIGHTS(weight3, w3_i32, w3_f32, zero2);
-            INFLATE_WEIGHTS(weight4, w4_i32, w4_f32, zero2);
-            INFLATE_WEIGHTS(weight5, w5_i32, w5_f32, zero3);
-            INFLATE_WEIGHTS(weight6, w6_i32, w6_f32, zero3);
-            INFLATE_WEIGHTS(weight7, w7_i32, w7_f32, zero4);
-            INFLATE_WEIGHTS(weight8, w8_i32, w8_f32, zero4);
+            INFLATE_WEIGHTS(weight1, zero1);
+            INFLATE_WEIGHTS(weight2, zero1);
+            INFLATE_WEIGHTS(weight3, zero2);
+            INFLATE_WEIGHTS(weight4, zero2);
+            INFLATE_WEIGHTS(weight5, zero3);
+            INFLATE_WEIGHTS(weight6, zero3);
+            INFLATE_WEIGHTS(weight7, zero4);
+            INFLATE_WEIGHTS(weight8, zero4);
 
             // Multiply and accumulate
-            acc1 = _mm512_fmadd_ps(w1_f32, input, acc1);
-            acc1 = _mm512_fmadd_ps(w2_f32, input2, acc1);
-            acc2 = _mm512_fmadd_ps(w3_f32, input, acc2);
-            acc2 = _mm512_fmadd_ps(w4_f32, input2, acc2);
-            acc3 = _mm512_fmadd_ps(w5_f32, input, acc3);
-            acc3 = _mm512_fmadd_ps(w6_f32, input2, acc3);
-            acc4 = _mm512_fmadd_ps(w7_f32, input, acc4);
-            acc4 = _mm512_fmadd_ps(w8_f32, input2, acc4);
+            acc1 = _mm512_fmadd_ps(weight1, input, acc1);
+            acc1 = _mm512_fmadd_ps(weight2, input2, acc1);
+            acc2 = _mm512_fmadd_ps(weight3, input, acc2);
+            acc2 = _mm512_fmadd_ps(weight4, input2, acc2);
+            acc3 = _mm512_fmadd_ps(weight5, input, acc3);
+            acc3 = _mm512_fmadd_ps(weight6, input2, acc3);
+            acc4 = _mm512_fmadd_ps(weight7, input, acc4);
+            acc4 = _mm512_fmadd_ps(weight8, input2, acc4);
         }
 
-        // Choose Scales
+        // Scale
         __m512 scale1 = _mm512_set1_ps(scales[row]);
         __m512 scale2 = _mm512_set1_ps(scales[row + 1]);
         __m512 scale3 = _mm512_set1_ps(scales[row + 2]);

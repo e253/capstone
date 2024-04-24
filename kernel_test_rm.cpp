@@ -28,10 +28,8 @@ void kernel_test1()
 
     q4f32s_128x128_ukernel(
         Weights, n / 2,
-        W_Scales, m,
-        W_Zeros, m / 2,
-        Input,
-        Output);
+        W_Scales, W_Zeros,
+        Input, Output);
 
     bool passed = true;
     for (int i = 0; i < m; i++) {
@@ -88,10 +86,8 @@ void kernel_test2()
 
     q4f32s_128x128_ukernel(
         Weights, n / 2,
-        W_Scales, m,
-        W_Zeros, m / 2,
-        Input,
-        Output);
+        W_Scales, W_Zeros,
+        Input, Output);
 
     bool passed = true;
     for (int i = 0; i < m; i++) {
@@ -155,10 +151,8 @@ void kernel_test3()
 
     q4f32s_128x128_ukernel(
         Weights, n / 2,
-        W_Scales, m,
-        W_Zeros, m / 2,
-        Input,
-        Output);
+        W_Scales, W_Zeros,
+        Input, Output);
 
     bool passed = true;
     for (int i = 0; i < m; i++) {
@@ -215,10 +209,8 @@ void kernel_test4()
 
     q4f32s_128x128_ukernel(
         Weights, n / 2,
-        W_Scales, m,
-        W_Zeros, m / 2,
-        Input,
-        Output);
+        W_Scales, W_Zeros,
+        Input, Output);
 
     bool passed = true;
     for (int i = 0; i < m; i += 4) {
@@ -285,12 +277,12 @@ void kernel_test5()
         // ptr + row * row_stride + col / 2
         Weights + 128 * n / 2 + 128 / 2, n / 2,
         // ptr + (col / QBLOCK_SIZE) * col_stride + (row)
-        W_Scales + (1) * m + 128, m,
+        W_Scales + (1) * m + 128,
         // W_Zeros + (block_id) * (QBLOCK_SIZE / 2);
         // block_id = row_block(row) * n_row_blocks + col_block(col);
         // row_block(row) = row / QBLOCK_SIZE;
         // col_block(col) = col / QBLOCK_SIZE;
-        W_Zeros + (3 * QBLOCK_SIZE / 2), m / 2,
+        W_Zeros + (3 * QBLOCK_SIZE / 2),
         // col
         Input + 128,
         // row

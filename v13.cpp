@@ -30,11 +30,10 @@ void q4f32s_ukernel_epiloque(float* ptr)
     tmp = _mm_and_si128(tmp, and_mask);                    \
     res = _mm_unpacklo_epi8(res, tmp)
 
-#define INFLATE_WEIGHTS(w, w_i32, w_f32, zeros, scales) \
-    w = _mm_sub_epi8(w, zeros);                         \
-    __m512i w_i32 = _mm512_cvtepi8_epi32(w);            \
-    __m512 w_f32 = _mm512_cvtepi32_ps(w_i32);           \
-    w_f32 = _mm512_mul_ps(scales, w_f32)
+#define INFLATE_WEIGHTS(w, w_i32, w_f32, zeros) \
+    w = _mm_sub_epi8(w, zeros);                 \
+    __m512i w_i32 = _mm512_cvtepi8_epi32(w);    \
+    __m512 w_f32 = _mm512_cvtepi32_ps(w_i32);
 
 void q4f32s_ukernel(
     uint8_t* w, // Weight, offset from the global pointer
@@ -87,17 +86,6 @@ void q4f32s_ukernel(
             UNZIP_U4_TO_U8(zeros7, tmp7, and_mask);
             UNZIP_U4_TO_U8(zeros8, tmp8, and_mask);
             zeros += zeros_cs;
-
-            // Scales
-            scale1 = _mm512_loadu_ps(scales + 0);
-            scale2 = _mm512_loadu_ps(scales + 16);
-            scale3 = _mm512_loadu_ps(scales + 32);
-            scale4 = _mm512_loadu_ps(scales + 48);
-            scale5 = _mm512_loadu_ps(scales + 64);
-            scale6 = _mm512_loadu_ps(scales + 80);
-            scale7 = _mm512_loadu_ps(scales + 96);
-            scale8 = _mm512_loadu_ps(scales + 112);
-            scales += scales_cs;
         }
 
         // load input
@@ -121,14 +109,14 @@ void q4f32s_ukernel(
         UNZIP_U4_TO_U8(weight6, tmp6, and_mask);
         UNZIP_U4_TO_U8(weight7, tmp7, and_mask);
         UNZIP_U4_TO_U8(weight8, tmp8, and_mask);
-        INFLATE_WEIGHTS(weight1, w1_i32, w1_f32, zeros1, scale1);
-        INFLATE_WEIGHTS(weight2, w2_i32, w2_f32, zeros2, scale2);
-        INFLATE_WEIGHTS(weight3, w3_i32, w3_f32, zeros3, scale3);
-        INFLATE_WEIGHTS(weight4, w4_i32, w4_f32, zeros4, scale4);
-        INFLATE_WEIGHTS(weight5, w5_i32, w5_f32, zeros5, scale5);
-        INFLATE_WEIGHTS(weight6, w6_i32, w6_f32, zeros6, scale6);
-        INFLATE_WEIGHTS(weight7, w7_i32, w7_f32, zeros7, scale7);
-        INFLATE_WEIGHTS(weight8, w8_i32, w8_f32, zeros8, scale8);
+        INFLATE_WEIGHTS(weight1, w1_i32, w1_f32, zeros1);
+        INFLATE_WEIGHTS(weight2, w2_i32, w2_f32, zeros2);
+        INFLATE_WEIGHTS(weight3, w3_i32, w3_f32, zeros3);
+        INFLATE_WEIGHTS(weight4, w4_i32, w4_f32, zeros4);
+        INFLATE_WEIGHTS(weight5, w5_i32, w5_f32, zeros5);
+        INFLATE_WEIGHTS(weight6, w6_i32, w6_f32, zeros6);
+        INFLATE_WEIGHTS(weight7, w7_i32, w7_f32, zeros7);
+        INFLATE_WEIGHTS(weight8, w8_i32, w8_f32, zeros8);
         w += w_cs;
 
         // Multiply and accumulate
@@ -140,6 +128,29 @@ void q4f32s_ukernel(
         acc6 = _mm512_fmadd_ps(w6_f32, input, acc6);
         acc7 = _mm512_fmadd_ps(w7_f32, input, acc7);
         acc8 = _mm512_fmadd_ps(w8_f32, input, acc8);
+
+        if ((col + 1) % QBLOCK_SIZE == 0) {
+            // Scales
+            scale1 = _mm512_loadu_ps(scales + 0);
+            scale2 = _mm512_loadu_ps(scales + 16);
+            scale3 = _mm512_loadu_ps(scales + 32);
+            scale4 = _mm512_loadu_ps(scales + 48);
+            scale5 = _mm512_loadu_ps(scales + 64);
+            scale6 = _mm512_loadu_ps(scales + 80);
+            scale7 = _mm512_loadu_ps(scales + 96);
+            scale8 = _mm512_loadu_ps(scales + 112);
+            scales += scales_cs;
+
+            // Scale
+            acc1 = _mm512_mul_ps(acc1, scale1);
+            acc2 = _mm512_mul_ps(acc2, scale2);
+            acc3 = _mm512_mul_ps(acc3, scale3);
+            acc4 = _mm512_mul_ps(acc4, scale4);
+            acc5 = _mm512_mul_ps(acc5, scale5);
+            acc6 = _mm512_mul_ps(acc6, scale6);
+            acc7 = _mm512_mul_ps(acc7, scale7);
+            acc8 = _mm512_mul_ps(acc8, scale8);
+        }
     }
 
     // Store Results

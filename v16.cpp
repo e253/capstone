@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <immintrin.h>
 #include <iostream>
@@ -39,7 +40,7 @@ typedef __m512 acc_t;
 #define REDUCE_ADD(acc) _mm512_reduce_add_ps((acc))
 #endif
 
-#define CLAMP(x, lo, hi) (x < lo ? lo : (x > hi ? hi : x))
+#define CLAMP(x, lo, hi) (x < lo ? lo : (x > hi ? hi : round(x)))
 
 inline acc_t mul_input_weight_accum(__m512i input, __m512i weight, __m512i zero, acc_t acc)
 {
@@ -52,7 +53,7 @@ inline acc_t mul_input_weight_accum(__m512i input, __m512i weight, __m512i zero,
 #ifdef I32ACCUM
     acc = _mm512_dpbusds_epi32(acc, weight, input);
     __m512i tmp = _mm512_dpbusds_epi32(_mm512_setzero_si512(), zero, input);
-    acc = _mm512_sub_epi32(acc, tmp);
+    acc = _mm512_sub_epi32(acc, tmp); // potential underflow in exchange for better performance
     return acc;
 #else
     __m512i tmp1 = _mm512_dpbusds_epi32(_mm512_setzero_epi32(), weight, input);
@@ -67,11 +68,11 @@ inline acc_t mul_input_weight_accum(__m512i input, __m512i weight, __m512i zero,
 w, Weight, offset from the global pointer
 w_rs, Row stride for weights
 scales, Weight scales, offset from the global pointer
-scales_rs, Row stride for scales
 zeros, Weight zeros, offset from the global pointer
-zeros_cs, Col stride for zeros
 in, input, offset from the global pointer
+in_scale, scale value for input
 out, out, offset from the global pointer
+out_scale, scale value for output
 */
 void q4f32s_qi8f32s_128x128_ukernel_offline(
     uint8_t* __restrict w,
@@ -115,7 +116,7 @@ void q4f32s_qi8f32s_128x128_ukernel_offline(
             // load input 64 values
             __m512i input = _mm512_loadu_epi8(in + col);
 
-            // load weights 64 values each.
+            // load weights 64 values each
             __m512i weight1 = load_weights(w + col / 2 + row * w_rs);
             __m512i weight2 = load_weights(w + col / 2 + (row + 1) * w_rs);
             __m512i weight3 = load_weights(w + col / 2 + (row + 2) * w_rs);
@@ -129,10 +130,10 @@ void q4f32s_qi8f32s_128x128_ukernel_offline(
 
         // This could be more efficient
         // CLAMP makes sure the float is within the range of int8_t
-        out[row] += (int8_t)CLAMP((REDUCE_ADD(acc1) * scales[row] * io_scale), -128.0f, 127.0f);
-        out[row + 1] += (int8_t)CLAMP((REDUCE_ADD(acc2) * scales[row + 1] * io_scale), -128.0f, 127.0f);
-        out[row + 2] += (int8_t)CLAMP((REDUCE_ADD(acc3) * scales[row + 2] * io_scale), -128.0f, 127.0f);
-        out[row + 3] += (int8_t)CLAMP((REDUCE_ADD(acc4) * scales[row + 3] * io_scale), -128.0f, 127.0f);
+        out[row] = (int8_t)CLAMP(((float)out[row] + REDUCE_ADD(acc1) * scales[row] * io_scale), -128.0f, 127.0f);
+        out[row + 1] = (int8_t)CLAMP(((float)out[row + 1] + REDUCE_ADD(acc2) * scales[row + 1] * io_scale), -128.0f, 127.0f);
+        out[row + 2] = (int8_t)CLAMP(((float)out[row + 2] + REDUCE_ADD(acc3) * scales[row + 2] * io_scale), -128.0f, 127.0f);
+        out[row + 3] = (int8_t)CLAMP(((float)out[row + 3] + REDUCE_ADD(acc4) * scales[row + 3] * io_scale), -128.0f, 127.0f);
     }
 }
 
@@ -155,38 +156,8 @@ void q4f32s_qi8f32s_egemv_offline(
                       int m, int n,
                       int start_row, int end_row,
                       int thread_id, int n_threads) {
-#ifdef _WIN32
-        // Doesn't seem to be helpful
-        HANDLE hThread = GetCurrentThread();
-        DWORD_PTR mask = 1 << (thread_id * 2);
-        DWORD_PTR result = SetThreadAffinityMask(hThread, mask);
-        if (result == 0) {
-            cerr << "Error calling SetThreadAffinityMask: " << GetLastError() << endl;
-            exit(0);
-        }
-#endif
-        // wrap around to reduce `in` coherence pressure
-        int n_cols_per_thread_block = n / n_threads;
-        assert(n_cols_per_thread_block % 128 == 0 && "Thread col blocks size must be divisible by 128");
-        int start_col = thread_id * n_cols_per_thread_block;
-
         int n_row_blocks = m / QBLOCK_SIZE;
-        for (int col = start_col; col < n; col += 128) {
-            int col_block = col / QBLOCK_SIZE;
-            for (int row = start_row; row < end_row; row += 128) {
-                int row_block = row / QBLOCK_SIZE;
-                int block_id = row_block * n_row_blocks + col_block;
-
-                q4f32s_qi8f32s_128x128_ukernel_offline(
-                    w + (row * n / 2 + col / 2), n / 2,
-                    s + block_id * QBLOCK_SIZE,
-                    z + block_id * (QBLOCK_SIZE / 2),
-                    in + col, in_scales[col / QBLOCK_SIZE],
-                    out + row, out_scales[row / QBLOCK_SIZE]);
-            }
-        }
-
-        for (int col = 0; col < start_col; col++) {
+        for (int col = 0; col < n; col += 128) {
             int col_block = col / QBLOCK_SIZE;
             for (int row = start_row; row < end_row; row += 128) {
                 int row_block = row / QBLOCK_SIZE;
@@ -204,9 +175,6 @@ void q4f32s_qi8f32s_egemv_offline(
 
     size_t n_threads = 4;
     vector<thread> threads(n_threads);
-#ifndef _WIN32
-    cpu_set_t cpuset;
-#endif
 
     int rows_per_thread = m / n_threads;
     assert(rows_per_thread % 128 == 0 && "Thread row blocks size must be divisible by 128");
@@ -216,18 +184,6 @@ void q4f32s_qi8f32s_egemv_offline(
     for (int thread_id = 0; thread_id < n_threads; thread_id++) {
         end_row = start_row + rows_per_thread;
         threads[thread_id] = thread(worker, w, s, z, in, in_scales, out, out_scales, m, n, start_row, end_row, thread_id, n_threads);
-#ifndef _WIN32
-/*
-        // https://eli.thegreenplace.net/2016/c11-threads-affinity-and-hyperthreading/
-        CPU_ZERO(&cpuset);
-        CPU_SET(thread_id, &cpuset);
-        int rc = pthread_setaffinity_np(threads[thread_id].native_handle(), sizeof(cpu_set_t), &cpuset);
-        if (rc != 0) {
-            cerr << "Error calling pthread_setaffinity_np: " << rc << endl;
-            exit(0);
-        }
-*/
-#endif
         start_row += rows_per_thread;
     }
     for (auto& t : threads) {
@@ -235,7 +191,6 @@ void q4f32s_qi8f32s_egemv_offline(
     }
     threads.clear();
 }
-
 /*
 w, Weight, offset from the global pointer
 w_rs, Row stride for weights
@@ -245,7 +200,6 @@ zeros, Weight zeros, offset from the global pointer
 zeros_cs, Col stride for zeros
 in, input, offset from the global pointer
 out, out, offset from the global pointer
-*/
 void q4f32s_qi8f32s_128x128_ukernel_otf(
     uint8_t* __restrict w,
     uint64_t w_rs,
@@ -298,7 +252,6 @@ void q4f32s_qi8f32s_128x128_ukernel_otf(
         }
 
         // This could be more efficient
-        // CLAMP makes sure the float is within the range of int8_t
         out[row] += REDUCE_ADD(acc1) * scales[row] * in_scale;
         out[row + 1] += REDUCE_ADD(acc2) * scales[row + 1] * in_scale;
         out[row + 2] += REDUCE_ADD(acc3) * scales[row + 2] * in_scale;
@@ -358,6 +311,7 @@ void q4f32s_qi8f32s_egemv_otf(
     }
     threads.clear();
 }
+*/
 
 // Testing!
 
@@ -383,6 +337,8 @@ void assert_arr_eq_i8(int8_t* arr, int8_t expected, int len, string passed_msg, 
 
 void test_128x128_offline()
 {
+    cout << "### q4f32s_qi8f32s_128x128_ukernel_offline() ###" << endl;
+
     int m = 128;
     int n = 128;
 
@@ -411,25 +367,16 @@ void test_128x128_offline()
         assert_arr_eq_i8(out, 100, m, "Offline 128x128 Test 1 Passed", "Offline 128x128 Test 1 Failed");
     }
 
-    // 2 - weight scales alternated along the input dimension
+    // 2 - non 1.0 input scale
     {
         BROADCAST(w, 0x55, m * n / 2);
-        int n_col_qblocks = n / QBLOCK_SIZE;
-        int n_row_qblocks = m / QBLOCK_SIZE;
-        for (int row_block = 0; row_block < n_row_qblocks; row_block++) {
-            for (int col_block = 0; col_block < n_col_qblocks; col_block++) {
-                int block_id = row_block * n_row_qblocks + col_block;
-                for (int el = 0; el < QBLOCK_SIZE; el++) {
-                    s[block_id * QBLOCK_SIZE + el] = (col_block % 2 == 0) ? 1.0f : 2.0f;
-                }
-            }
-        }
+        BROADCAST(s, 1.0f, m * n / QBLOCK_SIZE);
         BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
         BROADCAST(in, 2, n);
 
-        float in_s = 1.0f;
+        float in_s = 2.0f;
         std::memset(out, 0, m);
-        float out_s = 10.24f;
+        float out_s = 20.48f;
 
         q4f32s_qi8f32s_128x128_ukernel_offline(
             w, m / 2,
@@ -521,9 +468,73 @@ void test_128x128_offline()
     _mm_free(z);
     _mm_free(in);
     _mm_free(out);
+    cout << endl;
+}
+
+void test_offline_egemv()
+{
+    cout << "### q4f32s_qi8f32s_egemv_offline() ###" << endl;
+
+    int m = 512;
+    int n = 512;
+
+    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
+    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
+    int8_t* in = (int8_t*)_mm_malloc(n, 64);
+    float* in_scales = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
+    int8_t* out = (int8_t*)_mm_malloc(m, 64);
+    float* out_scales = (float*)_mm_malloc(m / QBLOCK_SIZE * sizeof(float), 64);
+
+    // 1 - Trivial
+    {
+        BROADCAST(w, 0x55, m * n / 2);
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
+        memset(out, 0, m);
+        BROADCAST(out_scales, 81.92f, m / QBLOCK_SIZE);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        assert_arr_eq_i8(out, 100, m, "Offline EGEMV Test 1 Passed", "Offline EGEMV Test 1 Failed");
+    }
+
+    // 2 - weight scales alternated along the input dimension
+    {
+        BROADCAST(w, 0x55, m * n / 2);
+        for (int row_block = 0; row_block < m / QBLOCK_SIZE; row_block++) {
+            for (int col_block = 0; col_block < n / QBLOCK_SIZE; col_block++) {
+                int block_id = row_block * n / QBLOCK_SIZE + col_block;
+                for (int el = 0; el < QBLOCK_SIZE; el++) {
+                    s[block_id * QBLOCK_SIZE + el] = (col_block % 2 == 0) ? 1.0f : 2.0f;
+                }
+            }
+        }
+        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
+        memset(out, 0, m);
+        BROADCAST(out_scales, 61.44f, m / QBLOCK_SIZE);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        assert_arr_eq_i8(out, 100, m, "Offline 128x128 Test 2 Passed", "Offline 128x128 Test 2 Failed");
+    }
+
+    _mm_free(w);
+    _mm_free(s);
+    _mm_free(z);
+    _mm_free(in);
+    _mm_free(in_scales);
+    _mm_free(out);
+    _mm_free(out_scales);
+    cout << endl;
 }
 
 int main()
 {
     test_128x128_offline();
+    test_offline_egemv();
 }

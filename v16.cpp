@@ -444,7 +444,7 @@ void test_128x128_offline()
         assert_arr_eq_i8(out, -100, m, "Offline 128x128 Test 4 Passed", "Offline 128x128 Test 4 Failed");
     }
 
-    // Trivial - But the out_s is too small to put the outputs into int8 range
+    // 5 - Trivial - But the out_s is too small to put the outputs into int8 range
     {
         memset(w, 0, m * n / 2);
         BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
@@ -461,6 +461,77 @@ void test_128x128_offline()
             out, out_s);
 
         assert_arr_eq_i8(out, -128, m, "Offline 128x128 Test 5 Passed", "Offline 128x128 Test 5 Failed");
+    }
+
+    // 6 - alternating weights along the output dimension
+    {
+        for (int row = 0; row < m; row++) { // row idx
+            for (int col = 0; col < n / 2; col++) { // col idx
+                w[row * n / 2 + col] = (row % 2 == 0) ? 0x33 : 0x55;
+            }
+        }
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        float in_s = 1.0f;
+        memset(out, 0, m);
+        float out_s = 20.48f;
+
+        q4f32s_qi8f32s_128x128_ukernel_offline(
+            w, m / 2,
+            s, z,
+            in, in_s,
+            out, out_s);
+
+        bool passed = true;
+        for (int i = 0; i < m; i++) {
+            if (out[i] != (i % 2 == 0 ? 50 : 100)) {
+                std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
+                passed = false;
+            }
+        }
+
+        if (passed) {
+            std::cout << "Offline 128x128 Test 6 Passed" << std::endl;
+        } else {
+            std::cout << "Offline 128x128 Test 6 Failed" << std::endl;
+        }
+    }
+
+    // 7 - alternate zero values by input dimension
+    {
+        BROADCAST(w, 0x11, m * n / 2);
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++) {
+            z[i] = (i % 2 == 0) ? 0x11 : 0x33;
+        }
+        BROADCAST(in, 2, n);
+        float in_s = 1.0f;
+        memset(out, 0, m);
+        float out_s = 10.24f;
+
+        q4f32s_qi8f32s_128x128_ukernel_offline(
+            w, m / 2,
+            s, z,
+            in, in_s,
+            out, out_s);
+
+        bool passed = true;
+        for (int i = 0; i < m; i += 4) {
+            if (out[i] != 0 || out[i + 1] != 0 || out[i + 2] != -100 || out[i + 3] != -100) {
+                std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
+                std::cout << "Output[" << i + 1 << "] = " << (int)out[i + 1] << std::endl;
+                std::cout << "Output[" << i + 2 << "] = " << (int)out[i + 2] << std::endl;
+                std::cout << "Output[" << i + 3 << "] = " << (int)out[i + 3] << std::endl;
+                passed = false;
+            }
+        }
+
+        if (passed) {
+            std::cout << "Offline 128x128 Test 7 Passed" << std::endl;
+        } else {
+            std::cout << "Offline 128x128 Test 7 Failed" << std::endl;
+        }
     }
 
     _mm_free(w);
@@ -520,7 +591,115 @@ void test_offline_egemv()
 
         q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
 
-        assert_arr_eq_i8(out, 100, m, "Offline 128x128 Test 2 Passed", "Offline 128x128 Test 2 Failed");
+        assert_arr_eq_i8(out, 100, m, "Offline Egemv Test 2 Passed", "Offline Egemv Test 2 Failed");
+    }
+
+    // 3 - trivial, but non 1.0 input scale
+    {
+        BROADCAST(w, 0x55, m * n / 2);
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        BROADCAST(in_scales, 2.0f, n / QBLOCK_SIZE);
+        memset(out, 0, m);
+        BROADCAST(out_scales, 163.84f, m / QBLOCK_SIZE);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        assert_arr_eq_i8(out, 100, m, "Offline EGEMV Test 3 Passed", "Offline EGEMV Test 3 Failed");
+    }
+
+    // 4 - trivial, but with negative values after 0 adjustment
+    {
+        BROADCAST(w, 0x00, m * n / 2);
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
+        memset(out, 0, m);
+        BROADCAST(out_scales, 81.92f, m / QBLOCK_SIZE);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        assert_arr_eq_i8(out, -100, m, "Offline EGEMV Test 4 Passed", "Offline EGEMV Test 4 Failed");
+    }
+
+    // 5 - trivial, but scale is too small to prevent int8 overflow
+    {
+        BROADCAST(w, 0x00, m * n / 2);
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
+        memset(out, 0, m);
+        BROADCAST(out_scales, 1.0f, m / QBLOCK_SIZE);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        assert_arr_eq_i8(out, -128, m, "Offline EGEMV Test 5 Passed", "Offline EGEMV Test 5 Failed");
+    }
+
+    // 6 - alternating weights along the output dimension
+    {
+        for (int row = 0; row < m; row++) { // row idx
+            for (int col = 0; col < n / 2; col++) { // col idx
+                w[row * n / 2 + col] = (row % 2 == 0) ? 0x33 : 0x55;
+            }
+        }
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
+        memset(out, 0, m);
+        BROADCAST(out_scales, 81.92f, m / QBLOCK_SIZE);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        bool passed = true;
+        for (int i = 0; i < m; i++) {
+            if (out[i] != (i % 2 == 0 ? 52 : 100)) { // this is not 50, becuase of rounding.
+                std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
+                passed = false;
+            }
+        }
+
+        if (passed) {
+            std::cout << "Offline EGEMV Test 6 Passed" << std::endl;
+        } else {
+            std::cout << "Offline EGEMV Test 6 Failed" << std::endl;
+        }
+    }
+
+    // 7 - alternating zeros along out dim
+    {
+        BROADCAST(w, 0x11, m * n / 2);
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++) {
+            z[i] = (i % 2 == 0) ? 0x11 : 0x33;
+        }
+        BROADCAST(in, 2, n);
+        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
+        memset(out, 0, m);
+        BROADCAST(out_scales, 40.96f, m / QBLOCK_SIZE);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        bool passed = true;
+        for (int i = 0; i < m; i += 4) {
+            if (out[i] != 0 || out[i + 1] != 0 || out[i + 2] != -100 || out[i + 3] != -100) {
+                std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
+                std::cout << "Output[" << i + 1 << "] = " << (int)out[i + 1] << std::endl;
+                std::cout << "Output[" << i + 2 << "] = " << (int)out[i + 2] << std::endl;
+                std::cout << "Output[" << i + 3 << "] = " << (int)out[i + 3] << std::endl;
+                passed = false;
+            }
+        }
+
+        if (passed) {
+            std::cout << "Offline EGEMV Test 7 Passed" << std::endl;
+        } else {
+            std::cout << "Offline EGEMV Test 7 Failed" << std::endl;
+        }
     }
 
     _mm_free(w);

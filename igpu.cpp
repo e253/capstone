@@ -26,6 +26,18 @@ const string cl_src = CL_SRC(
         }
     }
 
+    __kernel q4f32s_qi8f32s_offline(
+        uint8_t* w,
+        float* s,
+        uint8_t* z,
+        int8_t* in,
+        float* in_scales,
+        int8_t* out,
+        float* out_scales,
+        int m, int n) {
+
+    }
+
 );
 
 static cl_context context;
@@ -101,6 +113,21 @@ int main()
     clStatus = clGetDeviceIDs(NULL, CL_DEVICE_TYPE_GPU, numDevices, device, NULL);
     CL_CHECK(clStatus, "clGetDeviceIDs");
 
+    char dev_name[128];
+    clStatus = clGetDeviceInfo(device[0], CL_DEVICE_NAME, 128, dev_name, nullptr);
+    CL_CHECK(clStatus, "clGetDeviceInfo - CL_DEVICE_NAME");
+    cout << "Chose Device: " << dev_name << endl;
+
+    cl_uint max_compute_units;
+    clStatus = clGetDeviceInfo(device[0], CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cl_uint), &max_compute_units, nullptr);
+    CL_CHECK(clStatus, "clGetDeviceInfo - CL_DEVICE_MAX_COMPUTE_UNITS");
+    cout << "Processing Elements: " << max_compute_units << endl;
+
+    cl_ulong shared_memory_size;
+    clStatus = clGetDeviceInfo(device[0], CL_DEVICE_LOCAL_MEM_SIZE, sizeof(cl_ulong), &shared_memory_size, nullptr);
+    CL_CHECK(clStatus, "clGetDeviceInfo - CL_DEVICE_LOCAL_MEM_SIZE");
+    cout << "Shared Memory Size: " << shared_memory_size << " bytes" << endl;
+
     context = clCreateContext(NULL, 1, device, NULL, NULL, &clStatus);
     CL_CHECK(clStatus, "clCreateContext");
 
@@ -129,6 +156,8 @@ int main()
     CL_CHECK(clStatus, "clCreateKernel - vec_add");
 
     // test kernels
+    cout << endl
+         << "Testing vec_add..." << endl;
     test_vec_add();
 
     // cleanup

@@ -52,9 +52,9 @@ inline acc_t mul_input_weight_accum(__m512i input, __m512i negative_input, __m51
     return acc;
 #else
     // overflow safety
-    // highest weight value is 15, highest input is -128. at most -1920
-    // highest zero value 15, highest input is -128. at most -1920
-    // most this change the accumulator is -11360 (4 values are added into each i32 in acc) * (-3480 for each weight-zero pair)
+    // highest weight value is 15, highest abs input is 128. at most 1920
+    // highest zero value 15, highest abs input is 128. at most 1920
+    // most this change the accumulator is 11360 (4 values are added into each i32 in acc) * (3480 for each weight-zero pair)
     // we can safely use i32 for accumulation for ~600k values
 
     acc = _mm512_dpbusds_epi32(acc, weight, input);

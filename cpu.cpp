@@ -36,7 +36,7 @@ typedef __m512i acc_t;
 
 #define CLAMP(x, lo, hi) (x < lo ? lo : (x > hi ? hi : round(x)))
 
-inline acc_t mul_input_weight_accum(__m512i input, __m512i weight, __m512i zero, acc_t acc)
+inline acc_t mul_input_weight_accum(__m512i input, __m512i negative_input, __m512i weight, __m512i zero, acc_t acc)
 {
     /*
     VNNI likes u8 * i8 multiplications
@@ -58,8 +58,7 @@ inline acc_t mul_input_weight_accum(__m512i input, __m512i weight, __m512i zero,
     // we can safely use i32 for accumulation for ~600k values
 
     acc = _mm512_dpbusds_epi32(acc, weight, input);
-    __m512i tmp = _mm512_dpbusds_epi32(_mm512_setzero_si512(), zero, input);
-    acc = _mm512_sub_epi32(acc, tmp); // potential underflow in exchange for better performance
+    acc = _mm512_dpbusds_epi32(acc, zero, negative_input);
     return acc;
 #endif
 }
@@ -114,6 +113,7 @@ void q4f32s_qi8f32s_128x128_ukernel_offline(
         for (int col = 0; col < 128; col += 64) {
             // load input 64 values
             __m512i input = _mm512_loadu_epi8(in + col);
+            __m512i negative_input = _mm512_sub_epi8(_mm512_setzero_si512(), input);
 
             // load weights 64 values each
             __m512i weight1 = load_weights(w + col / 2 + row * w_rs);
@@ -121,10 +121,10 @@ void q4f32s_qi8f32s_128x128_ukernel_offline(
             __m512i weight3 = load_weights(w + col / 2 + (row + 2) * w_rs);
             __m512i weight4 = load_weights(w + col / 2 + (row + 3) * w_rs);
 
-            acc1 = mul_input_weight_accum(input, weight1, zero1, acc1);
-            acc2 = mul_input_weight_accum(input, weight2, zero2, acc2);
-            acc3 = mul_input_weight_accum(input, weight3, zero3, acc3);
-            acc4 = mul_input_weight_accum(input, weight4, zero4, acc4);
+            acc1 = mul_input_weight_accum(input, negative_input, weight1, zero1, acc1);
+            acc2 = mul_input_weight_accum(input, negative_input, weight2, zero2, acc2);
+            acc3 = mul_input_weight_accum(input, negative_input, weight3, zero3, acc3);
+            acc4 = mul_input_weight_accum(input, negative_input, weight4, zero4, acc4);
         }
 
         // This could be more efficient

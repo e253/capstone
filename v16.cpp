@@ -149,12 +149,12 @@ void q4f32s_qi8f32s_egemv_offline(
     assert(m % 128 == 0 && "Row size must be divisble by 128");
     assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
 
-    auto process_128_rows_n_cols = [&](uint8_t* w, float* s, uint8_t* z,
-                                       int8_t* in, float* in_scales,
-                                       int8_t* out, float* out_scales,
-                                       int m, int n,
-                                       int start_row, int end_row,
-                                       int thread_id) {
+    auto worker = [&](uint8_t* w, float* s, uint8_t* z,
+                      int8_t* in, float* in_scales,
+                      int8_t* out, float* out_scales,
+                      int m, int n,
+                      int start_row, int end_row,
+                      int thread_id, int n_threads) {
 #ifdef _WIN32
         // Doesn't seem to be helpful
         HANDLE hThread = GetCurrentThread();
@@ -165,12 +165,31 @@ void q4f32s_qi8f32s_egemv_offline(
             exit(0);
         }
 #endif
+        // wrap around to reduce `in` coherence pressure
+        int n_cols_per_thread_block = n / n_threads;
+        assert(n_cols_per_thread_block % 128 == 0 && "Thread col blocks size must be divisible by 128");
+        int start_col = thread_id * n_cols_per_thread_block;
 
         int n_row_blocks = m / QBLOCK_SIZE;
-        for (int row = start_row; row < end_row; row += 128) {
-            int row_block = row / QBLOCK_SIZE;
-            for (int col = 0; col < n; col += 128) {
-                int col_block = col / QBLOCK_SIZE;
+        for (int col = start_col; col < n; col += 128) {
+            int col_block = col / QBLOCK_SIZE;
+            for (int row = start_row; row < end_row; row += 128) {
+                int row_block = row / QBLOCK_SIZE;
+                int block_id = row_block * n_row_blocks + col_block;
+
+                q4f32s_qi8f32s_128x128_ukernel_offline(
+                    w + (row * n / 2 + col / 2), n / 2,
+                    s + block_id * QBLOCK_SIZE,
+                    z + block_id * (QBLOCK_SIZE / 2),
+                    in + col, in_scales[col / QBLOCK_SIZE],
+                    out + row, out_scales[row / QBLOCK_SIZE]);
+            }
+        }
+
+        for (int col = 0; col < start_col; col++) {
+            int col_block = col / QBLOCK_SIZE;
+            for (int row = start_row; row < end_row; row += 128) {
+                int row_block = row / QBLOCK_SIZE;
                 int block_id = row_block * n_row_blocks + col_block;
 
                 q4f32s_qi8f32s_128x128_ukernel_offline(
@@ -196,7 +215,7 @@ void q4f32s_qi8f32s_egemv_offline(
 
     for (int thread_id = 0; thread_id < n_threads; thread_id++) {
         end_row = start_row + rows_per_thread;
-        threads[thread_id] = thread(process_128_rows_n_cols, w, s, z, in, in_scales, out, out_scales, m, n, start_row, end_row, thread_id);
+        threads[thread_id] = thread(worker, w, s, z, in, in_scales, out, out_scales, m, n, start_row, end_row, thread_id, n_threads);
 #ifndef _WIN32
 /*
         // https://eli.thegreenplace.net/2016/c11-threads-affinity-and-hyperthreading/
@@ -299,28 +318,17 @@ void q4f32s_qi8f32s_egemv_otf(
     assert(m % 128 == 0 && "Row size must be divisble by 128");
     assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
 
-    auto process_128_rows_n_cols = [&](uint8_t* w, float* s, uint8_t* z,
-                                       int8_t* in, float* in_scales,
-                                       float* out,
-                                       int m, int n,
-                                       int start_row, int end_row,
-                                       int thread_id) {
-#ifdef _WIN32
-        // Doesn't seem to be helpful
-        HANDLE hThread = GetCurrentThread();
-        DWORD_PTR mask = 1 << (thread_id * 2);
-        DWORD_PTR result = SetThreadAffinityMask(hThread, mask);
-        if (result == 0) {
-            cerr << "Error calling SetThreadAffinityMask: " << GetLastError() << endl;
-            exit(0);
-        }
-#endif
-
+    auto worker = [&](uint8_t* w, float* s, uint8_t* z,
+                      int8_t* in, float* in_scales,
+                      float* out,
+                      int m, int n,
+                      int start_row, int end_row,
+                      int thread_id) {
         int n_row_blocks = m / QBLOCK_SIZE;
-        for (int row = start_row; row < end_row; row += 128) {
-            int row_block = row / QBLOCK_SIZE;
-            for (int col = 0; col < n; col += 128) {
-                int col_block = col / QBLOCK_SIZE;
+        for (int col = 0; col < n; col += 128) {
+            int col_block = col / QBLOCK_SIZE;
+            for (int row = start_row; row < end_row; row += 128) {
+                int row_block = row / QBLOCK_SIZE;
                 int block_id = row_block * n_row_blocks + col_block;
 
                 q4f32s_qi8f32s_128x128_ukernel_otf(
@@ -335,30 +343,14 @@ void q4f32s_qi8f32s_egemv_otf(
 
     size_t n_threads = 4;
     vector<thread> threads(n_threads);
-#ifndef _WIN32
-    cpu_set_t cpuset;
-#endif
 
     int rows_per_thread = m / n_threads;
     assert(rows_per_thread % 128 == 0 && "Thread row blocks size must be divisible by 128");
     int start_row = 0;
     int end_row;
-
     for (int thread_id = 0; thread_id < n_threads; thread_id++) {
         end_row = start_row + rows_per_thread;
-        threads[thread_id] = thread(process_128_rows_n_cols, w, s, z, in, in_scales, out, m, n, start_row, end_row, thread_id);
-#ifndef _WIN32
-/*
-        // https://eli.thegreenplace.net/2016/c11-threads-affinity-and-hyperthreading/
-        CPU_ZERO(&cpuset);
-        CPU_SET(thread_id, &cpuset);
-        int rc = pthread_setaffinity_np(threads[thread_id].native_handle(), sizeof(cpu_set_t), &cpuset);
-        if (rc != 0) {
-            cerr << "Error calling pthread_setaffinity_np: " << rc << endl;
-            exit(0);
-        }
-*/
-#endif
+        threads[thread_id] = thread(worker, w, s, z, in, in_scales, out, m, n, start_row, end_row, thread_id);
         start_row += rows_per_thread;
     }
     for (auto& t : threads) {
@@ -367,110 +359,161 @@ void q4f32s_qi8f32s_egemv_otf(
     threads.clear();
 }
 
-// benchmarks activated with -DBENCH
-#define TESTBENCH 1
-#ifdef TESTBENCH
-void test_1()
+// Testing!
+
+#define BROADCAST(ptr, val, len)  \
+    for (int i = 0; i < len; i++) \
+    ptr[i] = val
+
+void assert_arr_eq_i8(int8_t* arr, int8_t expected, int len, string passed_msg, string failed_msg)
+{
+    bool passed = true;
+    for (int i = 0; i < len; i++) {
+        if (arr[i] != expected) {
+            std::cout << "Output[" << i << "] = " << (int)arr[i] << std::endl;
+            passed = false;
+        }
+    }
+    if (passed) {
+        std::cout << passed_msg << std::endl;
+    } else {
+        std::cout << failed_msg << std::endl;
+    }
+}
+
+void test_128x128_offline()
 {
     int m = 128;
     int n = 128;
 
     uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
-    for (int i = 0; i < m * n / 2; i++)
-        w[i] = 0x55;
-
     float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
-    for (int i = 0; i < m * n / QBLOCK_SIZE; i++)
-        s[i] = 2.0f;
-
     uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
-    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
-        z[i] = 0x11;
-
     int8_t* in = (int8_t*)_mm_malloc(n * sizeof(float), 64);
-    for (int i = 0; i < n; i++)
-        in[i] = 2;
-    float in_s = 1.0f;
-
     int8_t* out = (int8_t*)_mm_malloc(m, 64);
-    std::memset(out, 0, m);
-    float out_s = 20.48f;
-    // keeps 2048 i32 into -128 <--> 127
 
-    q4f32s_qi8f32s_128x128_ukernel_offline(
-        w, m / 2,
-        s, z,
-        in, in_s,
-        out, out_s);
+    // 1 - Trivial
+    {
+        BROADCAST(w, 0x55, m * n / 2);
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        float in_s = 1.0f;
+        std::memset(out, 0, m);
+        float out_s = 20.48f;
 
-    bool passed = true;
-    for (int i = 0; i < m; i++) {
-        if (out[i] != 100) {
-            std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
-            passed = false;
+        q4f32s_qi8f32s_128x128_ukernel_offline(
+            w, m / 2,
+            s, z,
+            in, in_s,
+            out, out_s);
+
+        assert_arr_eq_i8(out, 100, m, "Offline 128x128 Test 1 Passed", "Offline 128x128 Test 1 Failed");
+    }
+
+    // 2 - weight scales alternated along the input dimension
+    {
+        BROADCAST(w, 0x55, m * n / 2);
+        int n_col_qblocks = n / QBLOCK_SIZE;
+        int n_row_qblocks = m / QBLOCK_SIZE;
+        for (int row_block = 0; row_block < n_row_qblocks; row_block++) {
+            for (int col_block = 0; col_block < n_col_qblocks; col_block++) {
+                int block_id = row_block * n_row_qblocks + col_block;
+                for (int el = 0; el < QBLOCK_SIZE; el++) {
+                    s[block_id * QBLOCK_SIZE + el] = (col_block % 2 == 0) ? 1.0f : 2.0f;
+                }
+            }
         }
+        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+
+        float in_s = 1.0f;
+        std::memset(out, 0, m);
+        float out_s = 10.24f;
+
+        q4f32s_qi8f32s_128x128_ukernel_offline(
+            w, m / 2,
+            s, z,
+            in, in_s,
+            out, out_s);
+
+        assert_arr_eq_i8(out, 100, m, "Offline 128x128 Test 2 Passed", "Offline 128x128 Test 2 Failed");
     }
 
-    if (!passed) {
-        std::cout << std::endl;
-        std::cout << "Kernel Test 1 Failed" << std::endl;
-        exit(0);
-    } else {
-        std::cout << "Kernel Test 1 Passed" << std::endl;
-    }
-
-    _mm_free(w);
-    _mm_free(s);
-    _mm_free(z);
-    _mm_free(in);
-    _mm_free(out);
-}
-void test_2()
-{
-    int m = 128;
-    int n = 128;
-
-    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
-    for (int i = 0; i < m * n / 2; i++)
-        w[i] = 0x55;
-
-    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
-    for (int i = 0; i < m * n / QBLOCK_SIZE; i++)
-        s[i] = 2.0f;
-
-    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
-    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
-        z[i] = 0x11;
-
-    int8_t* in = (int8_t*)_mm_malloc(n * sizeof(float), 64);
-    for (int i = 0; i < n; i++)
-        in[i] = 2;
-    float in_s = 1.0f;
-
-    float* out = (float*)_mm_malloc(m * sizeof(float), 64);
-    std::memset(out, 0, m);
-    // keeps 2048 i32 into -128 <--> 127
-
-    q4f32s_qi8f32s_128x128_ukernel_otf(
-        w, m / 2,
-        s, z,
-        in, in_s,
-        out);
-
-    bool passed = true;
-    for (int i = 0; i < m; i++) {
-        if (out[i] != 2048.0f) {
-            std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
-            passed = false;
+    // 3 - weights and scales alternated along the input dimension
+    {
+        for (int row = 0; row < m; row++) { // row idx
+            for (int col = 0; col < n / 2; col++) { // col idx
+                if (col % 2 == 0) {
+                    w[row * n / 2 + col] = 0x33;
+                } else {
+                    w[row * n / 2 + col] = 0x55;
+                }
+            }
         }
+
+        int n_col_qblocks = n / QBLOCK_SIZE;
+        int n_row_qblocks = m / QBLOCK_SIZE;
+        for (int row_block = 0; row_block < n_row_qblocks; row_block++) {
+            for (int col_block = 0; col_block < n_col_qblocks; col_block++) {
+                int block_id = row_block * n_row_qblocks + col_block;
+                for (int el = 0; el < QBLOCK_SIZE; el++) {
+                    s[block_id * QBLOCK_SIZE + el] = (col_block % 2 == 0) ? 1.0f : 2.0f;
+                }
+            }
+        }
+
+        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        float in_s = 1.0f;
+        std::memset(out, 0, m);
+        float out_s = 7.68f;
+
+        q4f32s_qi8f32s_128x128_ukernel_offline(
+            w, m / 2,
+            s, z,
+            in, in_s,
+            out, out_s);
+
+        assert_arr_eq_i8(out, 100, m, "Offline 128x128 Test 3 Passed", "Offline 128x128 Test 3 Failed");
     }
 
-    if (!passed) {
-        std::cout << std::endl;
-        std::cout << "Kernel Test 2 Failed" << std::endl;
-        exit(0);
-    } else {
-        std::cout << "Kernel Test 2 Passed" << std::endl;
+    // 4 - Trivial - But with negative values after zero adjustment
+    {
+        memset(w, 0, m * n / 2);
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        float in_s = 1.0f;
+        memset(out, 0, m);
+        float out_s = 20.48f;
+
+        q4f32s_qi8f32s_128x128_ukernel_offline(
+            w, m / 2,
+            s, z,
+            in, in_s,
+            out, out_s);
+
+        assert_arr_eq_i8(out, -100, m, "Offline 128x128 Test 4 Passed", "Offline 128x128 Test 4 Failed");
+    }
+
+    // Trivial - But the out_s is too small to put the outputs into int8 range
+    {
+        memset(w, 0, m * n / 2);
+        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+        BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(in, 2, n);
+        float in_s = 1.0f;
+        memset(out, 0, m);
+        float out_s = 1.0f;
+
+        q4f32s_qi8f32s_128x128_ukernel_offline(
+            w, m / 2,
+            s, z,
+            in, in_s,
+            out, out_s);
+
+        assert_arr_eq_i8(out, -128, m, "Offline 128x128 Test 5 Passed", "Offline 128x128 Test 5 Failed");
     }
 
     _mm_free(w);
@@ -480,107 +523,7 @@ void test_2()
     _mm_free(out);
 }
 
-#include <chrono>
-void bench_offline_500_for_dim(int m, int n)
-{
-    assert(m % 128 == 0 && "Row size must be divisble by 128");
-    assert(n % 128 == 0 && "Col size must be divisble by 128");
-
-    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
-    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
-    int8_t* in = (int8_t*)_mm_malloc(n, 64);
-    float* in_scales = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
-    int8_t* out = (int8_t*)_mm_malloc(m, 64);
-    float* out_scales = (float*)_mm_malloc(m / QBLOCK_SIZE * sizeof(float), 64);
-
-    const uint64_t NIT = 500;
-
-    auto start = chrono::high_resolution_clock::now();
-    for (int i = 0; i < NIT; i++) {
-        q4f32s_qi8f32s_egemv_offline(
-            w, s, z,
-            in, in_scales,
-            out, out_scales,
-            m, n);
-    }
-    auto end = chrono::high_resolution_clock::now();
-
-    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-
-    cout << "total: " << sec << " (s)" << endl;
-    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
-
-    uint64_t flops_processed = m * n * 2 * NIT;
-    double flops_sec = flops_processed / sec;
-    double gflops = flops_sec / (1e9);
-    cout << "GFLOPS: " << gflops << endl;
-    cout << endl;
-
-    _mm_free(w);
-    _mm_free(s);
-    _mm_free(z);
-    _mm_free(in);
-    _mm_free(in_scales);
-    _mm_free(out);
-    _mm_free(out_scales);
-}
-void bench_otf_500_for_dim(int m, int n)
-{
-    assert(m % 128 == 0 && "Row size must be divisble by 128");
-    assert(n % 128 == 0 && "Col size must be divisble by 128");
-
-    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
-    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
-    int8_t* in = (int8_t*)_mm_malloc(n, 64);
-    float* in_scales = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
-    float* out = (float*)_mm_malloc(m * sizeof(float), 64);
-
-    const uint64_t NIT = 500;
-
-    auto start = chrono::high_resolution_clock::now();
-    for (int i = 0; i < NIT; i++) {
-        q4f32s_qi8f32s_egemv_otf(
-            w, s, z,
-            in, in_scales,
-            out,
-            m, n);
-    }
-    auto end = chrono::high_resolution_clock::now();
-
-    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-
-    cout << "total: " << sec << " (s)" << endl;
-    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
-
-    uint64_t flops_processed = m * n * 2 * NIT;
-    double flops_sec = flops_processed / sec;
-    double gflops = flops_sec / (1e9);
-    cout << "GFLOPS: " << gflops << endl;
-    cout << endl;
-
-    _mm_free(w);
-    _mm_free(s);
-    _mm_free(z);
-    _mm_free(in);
-    _mm_free(in_scales);
-    _mm_free(out);
-}
 int main()
 {
-    cout << "Testing" << endl;
-    test_1();
-
-    cout << "Llama FNN (offline)" << endl;
-    bench_offline_500_for_dim(4096, 14336);
-    cout << "Llama FNN (otf)" << endl;
-    bench_otf_500_for_dim(4096, 14336);
-
-    cout << "Phi-2 FFN (offline)" << endl;
-    bench_offline_500_for_dim(2560, 10240);
-    cout << "Phi-1 FFN (otf)" << endl;
-    bench_otf_500_for_dim(2560, 10240);
-    return 0;
+    test_128x128_offline();
 }
-#endif

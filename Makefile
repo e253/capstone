@@ -1,4 +1,4 @@
-.PHONY: fmt clean
+.PHONY: all fmt clean
 
 all:
 	clang++ -march=native -O3 cpu.cpp -o cpu.exe

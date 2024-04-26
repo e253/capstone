@@ -6,12 +6,6 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
-
 #define QBLOCK_SIZE 128
 
 using namespace std;
@@ -32,12 +26,12 @@ inline __m512i load_weights(const uint8_t* w)
     return _mm512_and_si512(weight, _mm512_set1_epi8(0x0F));
 }
 
-#ifdef I32ACCUM
-typedef __m512i acc_t;
-#define REDUCE_ADD(acc) _mm512_reduce_add_ps(_mm512_cvtepi32_ps(acc))
-#else
+#ifdef F32ACCUM
 typedef __m512 acc_t;
 #define REDUCE_ADD(acc) _mm512_reduce_add_ps((acc))
+#else
+typedef __m512i acc_t;
+#define REDUCE_ADD(acc) (float)(_mm512_reduce_add_epi32(acc))
 #endif
 
 #define CLAMP(x, lo, hi) (x < lo ? lo : (x > hi ? hi : round(x)))
@@ -50,16 +44,22 @@ inline acc_t mul_input_weight_accum(__m512i input, __m512i weight, __m512i zero,
     Signed muliplications are possible, but only with ymm regs ^_^
     */
 
-#ifdef I32ACCUM
-    acc = _mm512_dpbusds_epi32(acc, weight, input);
-    __m512i tmp = _mm512_dpbusds_epi32(_mm512_setzero_si512(), zero, input);
-    acc = _mm512_sub_epi32(acc, tmp); // potential underflow in exchange for better performance
-    return acc;
-#else
+#ifdef F32ACCUM
     __m512i tmp1 = _mm512_dpbusds_epi32(_mm512_setzero_epi32(), weight, input);
     __m512i tmp2 = _mm512_dpbusds_epi32(_mm512_setzero_epi32(), zero, input);
     tmp1 = _mm512_sub_epi32(tmp1, tmp2);
     acc = _mm512_add_ps(acc, _mm512_cvtepi32_ps(tmp1));
+    return acc;
+#else
+    // overflow safety
+    // highest weight value is 15, highest input is -128. at most -1920
+    // highest zero value 15, highest input is -128. at most -1920
+    // most this change the accumulator is -11360 (4 values are added into each i32 in acc) * (-3480 for each weight-zero pair)
+    // we can safely use i32 for accumulation for ~600k values
+
+    acc = _mm512_dpbusds_epi32(acc, weight, input);
+    __m512i tmp = _mm512_dpbusds_epi32(_mm512_setzero_si512(), zero, input);
+    acc = _mm512_sub_epi32(acc, tmp); // potential underflow in exchange for better performance
     return acc;
 #endif
 }
@@ -88,18 +88,17 @@ void q4f32s_qi8f32s_128x128_ukernel_offline(
     float io_scale = in_scale / out_scale;
 
     for (int row = 0; row < 128; row += 4) {
-
 // Initialize accumulators
-#ifdef I32ACCUM
-        __m512i acc1 = _mm512_setzero_epi32();
-        __m512i acc2 = _mm512_setzero_epi32();
-        __m512i acc3 = _mm512_setzero_epi32();
-        __m512i acc4 = _mm512_setzero_epi32();
-#else
+#ifdef F32ACCUM
         __m512 acc1 = _mm512_setzero_ps();
         __m512 acc2 = _mm512_setzero_ps();
         __m512 acc3 = _mm512_setzero_ps();
         __m512 acc4 = _mm512_setzero_ps();
+#else
+        __m512i acc1 = _mm512_setzero_epi32();
+        __m512i acc2 = _mm512_setzero_epi32();
+        __m512i acc3 = _mm512_setzero_epi32();
+        __m512i acc4 = _mm512_setzero_epi32();
 #endif
 
         // Choose Zeros
@@ -150,29 +149,6 @@ void q4f32s_qi8f32s_egemv_offline(
     assert(m % 128 == 0 && "Row size must be divisble by 128");
     assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
 
-    auto worker = [&](uint8_t* w, float* s, uint8_t* z,
-                      int8_t* in, float* in_scales,
-                      int8_t* out, float* out_scales,
-                      int m, int n,
-                      int start_row, int end_row,
-                      int thread_id, int n_threads) {
-        int n_row_blocks = m / QBLOCK_SIZE;
-        for (int col = 0; col < n; col += 128) {
-            int col_block = col / QBLOCK_SIZE;
-            for (int row = start_row; row < end_row; row += 128) {
-                int row_block = row / QBLOCK_SIZE;
-                int block_id = row_block * n_row_blocks + col_block;
-
-                q4f32s_qi8f32s_128x128_ukernel_offline(
-                    w + (row * n / 2 + col / 2), n / 2,
-                    s + block_id * QBLOCK_SIZE,
-                    z + block_id * (QBLOCK_SIZE / 2),
-                    in + col, in_scales[col / QBLOCK_SIZE],
-                    out + row, out_scales[row / QBLOCK_SIZE]);
-            }
-        }
-    };
-
     size_t n_threads = 4;
     vector<thread> threads(n_threads);
 
@@ -183,7 +159,29 @@ void q4f32s_qi8f32s_egemv_offline(
 
     for (int thread_id = 0; thread_id < n_threads; thread_id++) {
         end_row = start_row + rows_per_thread;
-        threads[thread_id] = thread(worker, w, s, z, in, in_scales, out, out_scales, m, n, start_row, end_row, thread_id, n_threads);
+        threads[thread_id] = thread([&](uint8_t* w, float* s, uint8_t* z,
+                                        int8_t* in, float* in_scales,
+                                        int8_t* out, float* out_scales,
+                                        int m, int n,
+                                        int start_row, int end_row) {
+            int n_row_blocks = m / QBLOCK_SIZE;
+            for (int col = 0; col < n; col += 128) {
+                int col_block = col / QBLOCK_SIZE;
+                for (int row = start_row; row < end_row; row += 128) {
+                    int row_block = row / QBLOCK_SIZE;
+                    int block_id = row_block * n_row_blocks + col_block;
+
+                    q4f32s_qi8f32s_128x128_ukernel_offline(
+                        w + (row * n / 2 + col / 2), n / 2,
+                        s + block_id * QBLOCK_SIZE,
+                        z + block_id * (QBLOCK_SIZE / 2),
+                        in + col, in_scales[col / QBLOCK_SIZE],
+                        out + row, out_scales[row / QBLOCK_SIZE]);
+                }
+            }
+        },
+            w, s, z, in, in_scales, out, out_scales, m, n, start_row, end_row);
+
         start_row += rows_per_thread;
     }
     for (auto& t : threads) {

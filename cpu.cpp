@@ -31,7 +31,7 @@ typedef __m512 acc_t;
 #define REDUCE_ADD(acc) _mm512_reduce_add_ps((acc))
 #else
 typedef __m512i acc_t;
-#define REDUCE_ADD(acc) (float)(_mm512_reduce_add_epi32(acc))
+#define REDUCE_ADD(acc) _mm512_reduce_add_epi32(acc)
 #endif
 
 #define CLAMP(x, lo, hi) (x < lo ? lo : (x > hi ? hi : round(x)))
@@ -56,6 +56,7 @@ inline acc_t mul_input_weight_accum(__m512i input, __m512i negative_input, __m51
     // highest zero value 15, highest abs input is 128. at most 1920
     // most this change the accumulator is 11360 (4 values are added into each i32 in acc) * (3480 for each weight-zero pair)
     // we can safely use i32 for accumulation for ~600k values
+    // Or if we want to reduce these 16 i32 values to one, we use ~35k values
 
     acc = _mm512_dpbusds_epi32(acc, weight, input);
     acc = _mm512_dpbusds_epi32(acc, zero, negative_input);
@@ -94,10 +95,10 @@ void q4f32s_qi8f32s_128x128_ukernel_offline(
         __m512 acc3 = _mm512_setzero_ps();
         __m512 acc4 = _mm512_setzero_ps();
 #else
-        __m512i acc1 = _mm512_setzero_epi32();
-        __m512i acc2 = _mm512_setzero_epi32();
-        __m512i acc3 = _mm512_setzero_epi32();
-        __m512i acc4 = _mm512_setzero_epi32();
+        __m512i acc1 = _mm512_setzero_si512();
+        __m512i acc2 = _mm512_setzero_si512();
+        __m512i acc3 = _mm512_setzero_si512();
+        __m512i acc4 = _mm512_setzero_si512();
 #endif
 
         // Choose Zeros
@@ -129,10 +130,10 @@ void q4f32s_qi8f32s_128x128_ukernel_offline(
 
         // This could be more efficient
         // CLAMP makes sure the float is within the range of int8_t
-        out[row] = (int8_t)CLAMP(((float)out[row] + REDUCE_ADD(acc1) * scales[row] * io_scale), -128.0f, 127.0f);
-        out[row + 1] = (int8_t)CLAMP(((float)out[row + 1] + REDUCE_ADD(acc2) * scales[row + 1] * io_scale), -128.0f, 127.0f);
-        out[row + 2] = (int8_t)CLAMP(((float)out[row + 2] + REDUCE_ADD(acc3) * scales[row + 2] * io_scale), -128.0f, 127.0f);
-        out[row + 3] = (int8_t)CLAMP(((float)out[row + 3] + REDUCE_ADD(acc4) * scales[row + 3] * io_scale), -128.0f, 127.0f);
+        out[row] = (int8_t)CLAMP((out[row] + REDUCE_ADD(acc1) * scales[row] * io_scale), -128.0f, 127.0f);
+        out[row + 1] = (int8_t)CLAMP((out[row + 1] + REDUCE_ADD(acc2) * scales[row + 1] * io_scale), -128.0f, 127.0f);
+        out[row + 2] = (int8_t)CLAMP((out[row + 2] + REDUCE_ADD(acc3) * scales[row + 2] * io_scale), -128.0f, 127.0f);
+        out[row + 3] = (int8_t)CLAMP((out[row + 3] + REDUCE_ADD(acc4) * scales[row + 3] * io_scale), -128.0f, 127.0f);
     }
 }
 

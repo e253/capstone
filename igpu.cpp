@@ -26,17 +26,15 @@ const string cl_src = CL_SRC(
         }
     }
 
-    __kernel q4f32s_qi8f32s_offline(
-        uint8_t* w,
-        float* s,
-        uint8_t* z,
-        int8_t* in,
-        float* in_scales,
-        int8_t* out,
-        float* out_scales,
-        int m, int n) {
-
-    }
+    __kernel void q4f32s_qi8f32s_offline_v1(
+        __global uchar8* restrict w,
+        __global float* restrict s,
+        __global uchar8* restrict z,
+        __global char8* restrict in,
+        __global float* restrict in_scales,
+        __global char8* restrict out,
+        __global float* restrict out_scales,
+        int m, int n) {}
 
 );
 
@@ -94,6 +92,7 @@ void test_vec_add()
             passed = false;
         }
     }
+    SVMUNMAP(queue, c);
     if (passed) {
         cout << "Vector Add Passed!" << endl;
     } else {

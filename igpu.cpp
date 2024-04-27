@@ -26,15 +26,62 @@ const string cl_src = CL_SRC(
         }
     }
 
+    // m x n
+    // global-x = m / 128
+    // global-y = n / 128
+    // local-x = 1
+    // local-y = 4
     __kernel void q4f32s_qi8f32s_offline_v1(
-        __global uchar8* restrict w,
+        __global uchar4* restrict w,
         __global float* restrict s,
         __global uchar8* restrict z,
         __global char8* restrict in,
         __global float* restrict in_scales,
         __global char8* restrict out,
         __global float* restrict out_scales,
-        int m, int n) {}
+        int m, int n) {
+        int blockIdx = get_global_id(0);
+        int blockIdy = get_global_id(1);
+        int threadIdx = get_local_id(0);
+        int threadIdy = get_local_id(1);
+
+        // num quant blocks
+        int n_quant_blocks = get_local_size(0) / 128;
+
+        // acc
+        int4 acc = 0;
+
+        // Set Zeros
+        uchar4 tmp1 = w[0]; // figure out index
+        uchar4 tmp2 = tmp1;
+        tmp1 >>= 4;
+        uchar8 zeros = { tmp1, tmp2 };
+        zeros &= (uchar8)0x0F;
+
+        for (int quant_block = 0; quant_block < n_quant_blocks; quant_block++) {
+            for (int i = 0; i < 128; i += 8) {
+                // Load Weights
+                uchar4 tmp1 = w[0]; // figure out index
+                uchar4 tmp2 = tmp1;
+                tmp1 >>= 4;
+                uchar8 weights = { tmp1, tmp2 };
+                weights &= (uchar8)0x0F;
+
+                weights -= zeros;
+
+                short8 weights_short = convert_short8(weights);
+                short8 input = convert_short8(in[0]); // figure out index
+                short8 prod = weights_short * input;
+
+                acc += convert_int4(prod.lo) + convert_int4(prod.hi);
+            }
+        }
+
+        int acc_i32 = acc[0] + acc[1] + acc[2] + acc[3];
+
+        // figure out index
+        // out = atomic_fetch_add(out, acc);
+    }
 
 );
 

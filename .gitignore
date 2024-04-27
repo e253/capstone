@@ -5,3 +5,4 @@ tmp
 *.exe
 *vtune-data
 intel-sde
+cl.error

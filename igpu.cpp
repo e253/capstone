@@ -5,6 +5,8 @@
 
 using namespace std;
 
+#define QBLOCK_SIZE 128
+
 #define CL_CHECK(status, op)                                            \
     if (status != CL_SUCCESS) {                                         \
         cout << "OpenCL error: " << status << " During " << op << endl; \
@@ -16,6 +18,11 @@ using namespace std;
     for (int i = 0; i < len; i++) \
     ptr[i] = v
 
+static cl_context context;
+static cl_kernel vec_add_kernel;
+static cl_kernel q4f32s_qi8f32s_offline_v1_kernel;
+static cl_command_queue queue;
+
 #define CL_SRC(...) #__VA_ARGS__
 const string cl_src = CL_SRC(
 
@@ -26,68 +33,161 @@ const string cl_src = CL_SRC(
         }
     }
 
+    char clamp_i8(float x) {
+        if (x < -128.0f) {
+            x = -128.0f;
+        } else if (x > 127.0f) {
+            x = 127.0f;
+        }
+        return (char)x;
+    }
+
+    void atomicAddClamp(__global char* ptr, float val) {
+        char old = *ptr;
+        float next = clamp_i8((float)old + val);
+        while (atomic_cmpxchg(ptr, old, next) != old) {
+            old = *ptr;
+            next = clamp_i8((float)old + val);
+        }
+    }
+
     // m x n
     // global-x = m / 128
     // global-y = n / 128
-    // local-x = 1
-    // local-y = 4
+    // One work group per 128 x 128 block
+    // local-x 0 <--> 64 (2 rows per thread)
+    // local-y 0 <--> 0
+    // Each work item computes 4 x 128
     __kernel void q4f32s_qi8f32s_offline_v1(
         __global uchar4* restrict w,
         __global float* restrict s,
-        __global uchar8* restrict z,
+        __global uchar* restrict z,
         __global char8* restrict in,
         __global float* restrict in_scales,
-        __global char8* restrict out,
+        __global char* restrict out,
         __global float* restrict out_scales,
         int m, int n) {
-        int blockIdx = get_global_id(0);
-        int blockIdy = get_global_id(1);
-        int threadIdx = get_local_id(0);
-        int threadIdy = get_local_id(1);
+        const int QBLOCK_SIZE = 128;
+        const int blockIdx = get_group_id(0);
+        const int blockIdy = get_group_id(1);
+        const int threadIdx = get_local_id(0);
+        const int threadIdy = get_local_id(1);
 
-        // num quant blocks
-        int n_quant_blocks = get_local_size(0) / 128;
+        printf("Thread (%d, %d) in Block (%d, %d) acknowledging\n", threadIdx, threadIdy, blockIdx, blockIdy);
 
         // acc
-        int4 acc = 0;
+        int4 acc1 = 0;
+        int4 acc2 = 0;
 
         // Set Zeros
-        uchar4 tmp1 = w[0]; // figure out index
-        uchar4 tmp2 = tmp1;
-        tmp1 >>= 4;
-        uchar8 zeros = { tmp1, tmp2 };
-        zeros &= (uchar8)0x0F;
+        uchar zero12 = z[(blockIdx * (n / QBLOCK_SIZE) + blockIdy) * QBLOCK_SIZE / 2];
+        uchar tmp = zero12;
+        uchar8 zero1 = (uchar8)((zero12 >> 4) & 0x0F);
+        uchar8 zero2 = (uchar8)(tmp & 0x0F);
 
-        for (int quant_block = 0; quant_block < n_quant_blocks; quant_block++) {
-            for (int i = 0; i < 128; i += 8) {
-                // Load Weights
-                uchar4 tmp1 = w[0]; // figure out index
-                uchar4 tmp2 = tmp1;
-                tmp1 >>= 4;
-                uchar8 weights = { tmp1, tmp2 };
-                weights &= (uchar8)0x0F;
+        for (int i = 0; i < 128; i += 8) {
+            // Load Input
+            short8 input = convert_short8(in[blockIdy * 128 + i]);
 
-                weights -= zeros;
+            // Load Weights
+            uchar4 tmp1 = w[(blockIdx * 128 * n / 2 + blockIdy * 128) + i];
+            uchar4 tmp2 = tmp1;
+            tmp1 >>= 4;
+            uchar8 weights1 = { tmp1, tmp2 };
+            weights1 &= (uchar8)0x0F;
 
-                short8 weights_short = convert_short8(weights);
-                short8 input = convert_short8(in[0]); // figure out index
-                short8 prod = weights_short * input;
+            uchar4 tmp3 = w[0]; // figure out index
+            uchar4 tmp4 = tmp3;
+            tmp3 >>= 4;
+            uchar8 weights2 = { tmp3, tmp4 };
+            weights2 &= (uchar8)0x0F;
 
-                acc += convert_int4(prod.lo) + convert_int4(prod.hi);
-            }
+            weights1 -= zero1;
+            weights2 -= zero2;
+
+            short8 weights1_short = convert_short8(weights1);
+            short8 prod = weights1_short * input;
+
+            acc1 += convert_int4(prod.lo) + convert_int4(prod.hi);
+
+            short8 weights2_short = convert_short8(weights2);
+            short8 prod2 = weights2_short * input;
+
+            acc2 += convert_int4(prod2.lo) + convert_int4(prod2.hi);
         }
 
-        int acc_i32 = acc[0] + acc[1] + acc[2] + acc[3];
+        // Expensive - fewer y blocks would be ideal
+        float io_scale = in_scales[0] / out_scales[0];
 
-        // figure out index
-        // out = atomic_fetch_add(out, acc);
+        float acc1_reduced = (float)(acc1[0] + acc1[1] + acc1[2] + acc1[3]);
+        acc1_reduced *= in_scales[(blockIdx * (n / QBLOCK_SIZE) + blockIdy) * QBLOCK_SIZE / 2 + threadIdx * 2] * io_scale;
+        // atomicAddClamp(out + blockIdx * 128 + threadIdx * 2, acc1_reduced);
+        char acc1_reduced_clamped = clamp_i8(acc1_reduced);
+        printf("Writing Back %d, for out[%d]\n", (int)acc1_reduced_clamped, blockIdx * 128 + threadIdx * 2);
+        out[blockIdx * 128 + threadIdx * 2] = acc1_reduced_clamped;
+
+        float acc2_reduced = (float)(acc2[0] + acc2[1] + acc2[2] + acc2[3]);
+        acc2_reduced *= in_scales[(blockIdx * (n / QBLOCK_SIZE) + blockIdy) * QBLOCK_SIZE / 2 + threadIdx * 2 + 1] * io_scale;
+        char acc2_reduced_clamped = clamp_i8(acc2_reduced);
+        printf("Writing Back %d, for out[%d]\n", (int)acc2_reduced_clamped, blockIdx * 128 + threadIdx * 2 + 1);
+        out[blockIdx * 128 + threadIdx * 2 + 1] = acc2_reduced_clamped;
+        // atomicAddClamp(out + blockIdx * 128 + threadIdx * 2 + 1, acc2_reduced);
     }
 
 );
 
-static cl_context context;
-static cl_kernel vec_add_kernel;
-static cl_command_queue queue;
+void q4f32s_qi8f32s_egemv_offline(
+    uint8_t* w,
+    float* s,
+    uint8_t* z,
+    int8_t* in,
+    float* in_scales,
+    int8_t* out,
+    float* out_scales,
+    int m, int n)
+{
+    cl_int clStatus;
+    cl_kernel _q4f32s_qi8f32s_offline_v1_kernel = clCloneKernel(q4f32s_qi8f32s_offline_v1_kernel, &clStatus);
+    CL_CHECK(clStatus, "clCloneKernel")
+
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 0, w);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - w")
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 1, s);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - s")
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 2, z);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - z")
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 3, in);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - in")
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 4, in_scales);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - in_scales")
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 5, out);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - out")
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 6, out_scales);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - out_scales")
+    clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 7, sizeof(int), &m);
+    CL_CHECK(clStatus, "clSetKernelArg - m")
+    clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 8, sizeof(int), &n);
+    CL_CHECK(clStatus, "clSetKernelArg - n")
+
+    cl_event event;
+    const size_t _m = m;
+    const size_t _n = n;
+    // global work size is the number of work items in each dimension
+    const size_t global_work_size[] = { (_m / 128) * 64, _n / 128 };
+    // local work size is the number of work items in each work group
+    const size_t local_work_size[] = { 64, 1 };
+    // n work groups per dimension is found by dividing the global work size by the local work size
+    // in each dimension
+    clStatus = clEnqueueNDRangeKernel(
+        queue, q4f32s_qi8f32s_offline_v1_kernel,
+        2, nullptr,
+        global_work_size, local_work_size,
+        0, nullptr, &event);
+    CL_CHECK(clStatus, "q4f32s_qi8f32s_offline_v1_kernel invocation")
+
+    clStatus = clWaitForEvents(1, &event);
+    CL_CHECK(clStatus, "clWaitForEvents")
+}
 
 void test_vec_add()
 {
@@ -151,6 +251,76 @@ void test_vec_add()
     clSVMFree(context, c);
 }
 
+void test_128x128_input()
+{
+    const int m = 128;
+    const int n = 128;
+
+    uint8_t* w = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / 2, 64);
+    float* s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE / 2, 64);
+    int8_t* in = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, n * sizeof(float), 64);
+    float* in_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, sizeof(float), 64);
+    int8_t* out = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m, 64);
+    float* out_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, sizeof(float), 64);
+
+    // 1 - Trivial
+    {
+        SVMMAP(queue, w, m * n / 2);
+        BROADCAST(w, m * n / 2, 0x55);
+        SVMUNMAP(queue, w);
+
+        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
+        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
+        SVMUNMAP(queue, s);
+
+        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
+        SVMUNMAP(queue, z);
+
+        SVMMAP(queue, in, n);
+        BROADCAST(in, n, 2);
+        SVMUNMAP(queue, in);
+
+        SVMMAP(queue, in_scales, 1);
+        in_scales[0] = 1.0f;
+        SVMUNMAP(queue, in_scales);
+
+        SVMMAP(queue, out, m);
+        memset(out, 0, m);
+        SVMUNMAP(queue, out);
+
+        SVMMAP(queue, out_scales, 1);
+        out_scales[0] = 20.48f;
+        SVMUNMAP(queue, out_scales);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        SVMMAP(queue, out, m);
+        bool passed = true;
+        for (int i = 0; i < m; i++) {
+            if (out[i] != 100) {
+                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
+                passed = false;
+            }
+        }
+        SVMUNMAP(queue, out);
+        if (passed) {
+            cout << "Test 1 Passed!" << endl;
+        } else {
+            cout << "Test 1 Failed!" << endl;
+        }
+    }
+
+    clSVMFree(context, w);
+    clSVMFree(context, s);
+    clSVMFree(context, z);
+    clSVMFree(context, in);
+    clSVMFree(context, in_scales);
+    clSVMFree(context, out);
+    clSVMFree(context, out_scales);
+}
+
 int main()
 {
     cl_int clStatus;
@@ -200,11 +370,17 @@ int main()
 
     vec_add_kernel = clCreateKernel(p, "vec_add", &clStatus);
     CL_CHECK(clStatus, "clCreateKernel - vec_add");
+    q4f32s_qi8f32s_offline_v1_kernel = clCreateKernel(p, "q4f32s_qi8f32s_offline_v1", &clStatus);
+    CL_CHECK(clStatus, "clCreateKernel - q4f32s_qi8f32s_offline_v1");
 
     // test kernels
     cout << endl
          << "Testing vec_add..." << endl;
     test_vec_add();
+
+    cout << endl
+         << "Testing 128x128 input..." << endl;
+    test_128x128_input();
 
     // cleanup
     clReleaseKernel(vec_add_kernel);

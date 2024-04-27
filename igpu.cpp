@@ -1,4 +1,5 @@
 #include <CL/cl.h>
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -33,23 +34,11 @@ const string cl_src = CL_SRC(
         }
     }
 
-    void atomicAddClamp(__global char* ptr, float val) {
-        char old = *ptr;
-        char next = convert_char_sat((float)old + val);
-        while (atomic_cmpxchg(ptr, old, next) != old) {
-            old = *ptr;
-            next = convert_char_sat((float)old + val);
-        }
+    inline char clamp(float x) {
+        return (char)(x > 127.0f ? 127 : (x < -128.0f ? -128 : round(x)));
     }
 
-    // m x n
-    // global-x = m / 128
-    // global-y = n / 128
-    // One work group per 128 x 128 block
-    // local-x 0 <--> 64 (2 rows per thread)
-    // local-y 0 <--> 0
-    // Each work item computes 4 x 128
-    __kernel void q4f32s_qi8f32s_offline_v1(
+    __kernel __attribute__((intel_reqd_sub_group_size(32))) void q4f32s_qi8f32s_offline_v1(
         __global uchar2* restrict w,
         __global float* restrict s,
         __global uchar* restrict z,
@@ -57,98 +46,72 @@ const string cl_src = CL_SRC(
         __global float* restrict in_scales,
         __global char* restrict out,
         __global float* restrict out_scales,
-        int m, int n) {
+        int m, int n, int n_blocks_per_thread, int n_rows_per_thread) {
         const int QBLOCK_SIZE = 128;
         const int blockIdx = get_group_id(0);
         const int blockIdy = get_group_id(1);
         const int threadIdx = get_local_id(0);
         const int threadIdy = get_local_id(1);
 
-        // printf("Thread (%d, %d) in Block (%d, %d) acknowledging\n", threadIdx, threadIdy, blockIdx, blockIdy);
+        float acc1 = 0;
+        float acc2 = 0;
 
-        // acc
-        int2 acc1 = 0;
-        int2 acc2 = 0;
+        for (int qblock = 0; qblock < n_blocks_per_thread; qblock++) {
+            // qblock-acc
+            int2 acc1i = 0;
+            int2 acc2i = 0;
 
-        int QBLOCK_ID = blockIdx * (n / QBLOCK_SIZE) + blockIdx;
+            int QBLOCK_ID = blockIdx * (n / QBLOCK_SIZE) + (blockIdy + qblock);
 
-        // Set Zeros
-        uchar zero12 = z[QBLOCK_ID * QBLOCK_SIZE / 2 + threadIdx];
-        uchar tmp = zero12;
-        uchar4 zero1 = (uchar4)((zero12 >> 4) & 0x0F);
-        uchar4 zero2 = (uchar4)(tmp & 0x0F);
+            // Set Zeros
+            uchar zero12 = z[QBLOCK_ID * QBLOCK_SIZE / 2 + threadIdx]; // check
+            uchar tmp = zero12;
+            uchar4 zero1 = (uchar4)((zero12 >> 4) & 0x0F);
+            uchar4 zero2 = (uchar4)(tmp & 0x0F);
 
-        for (int i = 0; i < 128 / 4; i++) {
-            // Load Input
-            char4 cinput = in[blockIdy * 128 + i];
-            short4 input = convert_short4(cinput);
-            // printf("B(%d, %d):(%d, %d)[%d] - [%d, %d, %d, %d]\n", threadIdx, threadIdy, blockIdx, blockIdy, i, (int)input.s0, (int)input.s1, (int)input.s2, (int)input.s3);
+            for (int i = 0; i < 128 / 4; i++) {
+                // Load Input
+                short4 input = convert_short4(in[blockIdy * 128 + i]); // check
 
-            // Load Weights
-            uchar2 tmp1 = w[(blockIdx * 128 * n / 2 + blockIdy * 128) + i];
-            uchar2 tmp2 = tmp1;
-            tmp1 >>= 4;
-            uchar4 weights1 = { tmp1, tmp2 };
-            weights1 &= (uchar4)0x0F;
-            // printf("Weights1: (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)weights1.s0, (int)weights1.s1, (int)weights1.s2, (int)weights1.s3);
+                // Load Weights
+                uchar2 tmp1 = w[(blockIdx * 128 * n / 2 + blockIdy * 128) + i]; // check
+                uchar2 tmp2 = tmp1;
+                tmp1 >>= 4;
+                uchar4 weights1 = { tmp1, tmp2 };
+                weights1 &= (uchar4)0x0F;
 
-            uchar2 tmp3 = w[0]; // figure out index
-            uchar2 tmp4 = tmp3;
-            tmp3 >>= 4;
-            uchar4 weights2 = { tmp3, tmp4 };
-            weights2 &= (uchar4)0x0F;
-            // printf("Weights2: (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)weights2.s0, (int)weights2.s1, (int)weights2.s2, (int)weights2.s3);
+                uchar2 tmp3 = w[0]; // check
+                uchar2 tmp4 = tmp3;
+                tmp3 >>= 4;
+                uchar4 weights2 = { tmp3, tmp4 };
+                weights2 &= (uchar4)0x0F;
 
-            weights1 -= zero1;
-            weights2 -= zero2;
-            // printf("Weights1 (zeroed): (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)weights1.s0, (int)weights1.s1, (int)weights1.s2, (int)weights1.s3);
-            // printf("Weights2 (zeroed): (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)weights2.s0, (int)weights2.s1, (int)weights2.s2, (int)weights2.s3);
+                weights1 -= zero1;
+                weights2 -= zero2;
 
-            short4 weights1_short = convert_short4(weights1);
-            short4 prod = weights1_short * input;
-            // printf("Prod: (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)prod.s0, (int)prod.s1, (int)prod.s2, (int)prod.s3);
+                short4 prod = convert_short4(weights1) * input;
+                acc1i += convert_int2(prod.lo) + convert_int2(prod.hi);
 
-            acc1 += convert_int2(prod.lo) + convert_int2(prod.hi);
+                short4 prod2 = convert_short4(weights2) * input;
+                acc2i += convert_int2(prod2.lo) + convert_int2(prod2.hi);
+            } // block process
 
-            short4 weights2_short = convert_short4(weights2);
-            short4 prod2 = weights2_short * input;
-            // printf("Prod2: (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)prod.s0, (int)prod.s1, (int)prod.s2, (int)prod.s3);
+            acc1 += (float)(acc1i.s0 + acc1i.s1) * s[QBLOCK_ID + threadIdx * 2] * in_scales[blockIdy + qBlock]; // check s
+            acc2 += (float)(acc2i.s0 + acc2i.s1) * s[QBLOCK_ID + threadIdx * 2 + 1] * in_scales[blockIdy + qBlock]; // check s
+        } // qblock
 
-            acc2 += convert_int2(prod2.lo) + convert_int2(prod2.hi);
+        sub_group_reduce_add(acc1);
+        sub_group_reduce_add(acc2);
+
+        if (get_local_id(0) == 0) { // check if
+            out[blockIdx * 128 + threadIdx * 2] = convert_char_sat(acc1 / out_scales[blockIdx]); // check out_scales
+            out[blockIdx * 128 + threadIdx * 2 + 1] = convert_char_sat(acc2 / out_scales[blockIdx]); // check out_scales
         }
-        // printf("Acc (final): (%d, %d) - [%d, %d]\n", threadIdx, threadIdy, acc1.s0, acc1.s1);
-        // printf("Acc2 (final): (%d, %d) - [%d, %d]\n", threadIdx, threadIdy, acc2.s0, acc2.s1);
-
-        // Expensive - fewer y blocks would be ideal
-        float io_scale = in_scales[0] / out_scales[0];
-        // printf("IO Scale: %f\n", io_scale);
-
-        float scale1 = s[QBLOCK_ID + threadIdx * 2];
-        // printf("(%d, %d) - Scale1: %f\n", threadIdx, threadIdy, scale1);
-        float acc1_reduced = (float)(acc1.s0 + acc1.s1) * scale1 * io_scale;
-        while (true) {
-            char old = out[blockIdx * 128 + threadIdx * 2];
-            char next = convert_char_sat((float)old + acc1_reduced);
-            if (atomic_compare_exchange_strong(out + blockIdx * 128 + threadIdx * 2, &old, next)) {
-                break;
-            }
-        }
-        // atomicAddClamp(out + blockIdx * 128 + threadIdx * 2, acc1_reduced);
-        //  char acc1_reduced_clamped = convert_char_sat(acc1_reduced); // clamp_i8(acc1_reduced);
-        //   printf("Writing Back %d, for out[%d]\n", (int)acc1_reduced_clamped, blockIdx * 128 + threadIdx * 2);
-        //   out[blockIdx * 128 + threadIdx * 2] = acc1_reduced_clamped;
-
-        float scale2 = s[QBLOCK_ID + threadIdx * 2 + 1];
-        // printf("(%d, %d) - Scale2: %f\n", threadIdx, threadIdy, scale2);
-        float acc2_reduced = (float)(acc2.s0 + acc2.s1) * scale2 * io_scale;
-        char acc2_reduced_clamped = convert_char_sat(acc2_reduced);
-        // printf("Writing Back %d, for out[%d]\n", (int)acc2_reduced_clamped, blockIdx * 128 + threadIdx * 2 + 1);
-        // out[blockIdx * 128 + threadIdx * 2 + 1] = acc2_reduced_clamped;
-        atomicAddClamp(out + blockIdx * 128 + threadIdx * 2 + 1, acc2_reduced);
     }
 
 );
 
+// DO NOT CALL FROM MULTIPLE THREADS!
 void q4f32s_qi8f32s_egemv_offline(
     uint8_t* w,
     float* s,
@@ -159,10 +122,11 @@ void q4f32s_qi8f32s_egemv_offline(
     float* out_scales,
     int m, int n)
 {
-    cl_int clStatus;
-    cl_kernel _q4f32s_qi8f32s_offline_v1_kernel = clCloneKernel(q4f32s_qi8f32s_offline_v1_kernel, &clStatus);
-    CL_CHECK(clStatus, "clCloneKernel")
+    assert(m >= 128 && n >= 128 && "m and n must be at least 128");
+    assert(m <= 16384 && n <= 16384 && "m and n can be at most 16384");
+    assert(m % 128 == 0 && n % 128 == 0 && "m and n must be multiples of 128");
 
+    cl_int clStatus;
     clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 0, w);
     CL_CHECK(clStatus, "clSetKernelArgSVMPointer - w")
     clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 1, s);
@@ -181,6 +145,23 @@ void q4f32s_qi8f32s_egemv_offline(
     CL_CHECK(clStatus, "clSetKernelArg - m")
     clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 8, sizeof(int), &n);
     CL_CHECK(clStatus, "clSetKernelArg - n")
+
+    int n_cols_per_thread = n / 32; // n / WARP_SIZE
+    if (n_cols_per_thread < 128) {
+        n_cols_per_thread = 128;
+    } else if (n_cols_per_thread < 256) {
+        n_cols_per_thread = 256;
+    } else if (n_cols_per_thread < 512) {
+        n_cols_per_thread = 512;
+    }
+
+    clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 9, sizeof(int), &n_blocks_per_thread);
+    CL_CHECK(clStatus, "clSetKernelArg - n_blocks_per_thread")
+
+    n_colwise_threads = n / n_cols_per_thread;
+    n_available_row_threads_per_wg = 256 / n_colwise_threads;
+    n_rows_per_thread = m / 256;
+    // find correct assignment of n_rows_per_thread s.t. n_rows_per_thread_per_wg * n_colwise_threads <= 256
 
     cl_event event;
     const size_t _m = m;

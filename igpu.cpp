@@ -59,10 +59,10 @@ const string cl_src = CL_SRC(
     // local-y 0 <--> 0
     // Each work item computes 4 x 128
     __kernel void q4f32s_qi8f32s_offline_v1(
-        __global uchar4* restrict w,
+        __global uchar2* restrict w,
         __global float* restrict s,
         __global uchar* restrict z,
-        __global char8* restrict in,
+        __global char4* restrict in,
         __global float* restrict in_scales,
         __global char* restrict out,
         __global float* restrict out_scales,
@@ -73,63 +73,78 @@ const string cl_src = CL_SRC(
         const int threadIdx = get_local_id(0);
         const int threadIdy = get_local_id(1);
 
-        printf("Thread (%d, %d) in Block (%d, %d) acknowledging\n", threadIdx, threadIdy, blockIdx, blockIdy);
+        // printf("Thread (%d, %d) in Block (%d, %d) acknowledging\n", threadIdx, threadIdy, blockIdx, blockIdy);
 
         // acc
-        int4 acc1 = 0;
-        int4 acc2 = 0;
+        int2 acc1 = 0;
+        int2 acc2 = 0;
+
+        int QBLOCK_ID = blockIdx * (n / QBLOCK_SIZE) + blockIdx;
 
         // Set Zeros
-        uchar zero12 = z[(blockIdx * (n / QBLOCK_SIZE) + blockIdy) * QBLOCK_SIZE / 2];
+        uchar zero12 = z[QBLOCK_ID * QBLOCK_SIZE / 2 + threadIdx];
         uchar tmp = zero12;
-        uchar8 zero1 = (uchar8)((zero12 >> 4) & 0x0F);
-        uchar8 zero2 = (uchar8)(tmp & 0x0F);
+        uchar4 zero1 = (uchar4)((zero12 >> 4) & 0x0F);
+        uchar4 zero2 = (uchar4)(tmp & 0x0F);
 
-        for (int i = 0; i < 128; i += 8) {
+        for (int i = 0; i < 128 / 4; i++) {
             // Load Input
-            short8 input = convert_short8(in[blockIdy * 128 + i]);
+            char4 cinput = in[blockIdy * 128 + i];
+            short4 input = convert_short4(cinput);
+            // printf("B(%d, %d):(%d, %d)[%d] - [%d, %d, %d, %d]\n", threadIdx, threadIdy, blockIdx, blockIdy, i, (int)input.s0, (int)input.s1, (int)input.s2, (int)input.s3);
 
             // Load Weights
-            uchar4 tmp1 = w[(blockIdx * 128 * n / 2 + blockIdy * 128) + i];
-            uchar4 tmp2 = tmp1;
+            uchar2 tmp1 = w[(blockIdx * 128 * n / 2 + blockIdy * 128) + i];
+            uchar2 tmp2 = tmp1;
             tmp1 >>= 4;
-            uchar8 weights1 = { tmp1, tmp2 };
-            weights1 &= (uchar8)0x0F;
+            uchar4 weights1 = { tmp1, tmp2 };
+            weights1 &= (uchar4)0x0F;
+            // printf("Weights1: (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)weights1.s0, (int)weights1.s1, (int)weights1.s2, (int)weights1.s3);
 
-            uchar4 tmp3 = w[0]; // figure out index
-            uchar4 tmp4 = tmp3;
+            uchar2 tmp3 = w[0]; // figure out index
+            uchar2 tmp4 = tmp3;
             tmp3 >>= 4;
-            uchar8 weights2 = { tmp3, tmp4 };
-            weights2 &= (uchar8)0x0F;
+            uchar4 weights2 = { tmp3, tmp4 };
+            weights2 &= (uchar4)0x0F;
+            // printf("Weights2: (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)weights2.s0, (int)weights2.s1, (int)weights2.s2, (int)weights2.s3);
 
             weights1 -= zero1;
             weights2 -= zero2;
+            // printf("Weights1 (zeroed): (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)weights1.s0, (int)weights1.s1, (int)weights1.s2, (int)weights1.s3);
+            // printf("Weights2 (zeroed): (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)weights2.s0, (int)weights2.s1, (int)weights2.s2, (int)weights2.s3);
 
-            short8 weights1_short = convert_short8(weights1);
-            short8 prod = weights1_short * input;
+            short4 weights1_short = convert_short4(weights1);
+            short4 prod = weights1_short * input;
+            // printf("Prod: (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)prod.s0, (int)prod.s1, (int)prod.s2, (int)prod.s3);
 
-            acc1 += convert_int4(prod.lo) + convert_int4(prod.hi);
+            acc1 += convert_int2(prod.lo) + convert_int2(prod.hi);
 
-            short8 weights2_short = convert_short8(weights2);
-            short8 prod2 = weights2_short * input;
+            short4 weights2_short = convert_short4(weights2);
+            short4 prod2 = weights2_short * input;
+            // printf("Prod2: (%d, %d) - [%d, %d, %d, %d]\n", threadIdx, threadIdy, (int)prod.s0, (int)prod.s1, (int)prod.s2, (int)prod.s3);
 
-            acc2 += convert_int4(prod2.lo) + convert_int4(prod2.hi);
+            acc2 += convert_int2(prod2.lo) + convert_int2(prod2.hi);
         }
+        // printf("Acc (final): (%d, %d) - [%d, %d]\n", threadIdx, threadIdy, acc1.s0, acc1.s1);
+        // printf("Acc2 (final): (%d, %d) - [%d, %d]\n", threadIdx, threadIdy, acc2.s0, acc2.s1);
 
         // Expensive - fewer y blocks would be ideal
         float io_scale = in_scales[0] / out_scales[0];
+        // printf("IO Scale: %f\n", io_scale);
 
-        float acc1_reduced = (float)(acc1[0] + acc1[1] + acc1[2] + acc1[3]);
-        acc1_reduced *= in_scales[(blockIdx * (n / QBLOCK_SIZE) + blockIdy) * QBLOCK_SIZE / 2 + threadIdx * 2] * io_scale;
+        float scale1 = s[QBLOCK_ID + threadIdx * 2];
+        // printf("(%d, %d) - Scale1: %f\n", threadIdx, threadIdy, scale1);
+        float acc1_reduced = (float)(acc1.s0 + acc1.s1) * scale1 * io_scale;
         // atomicAddClamp(out + blockIdx * 128 + threadIdx * 2, acc1_reduced);
-        char acc1_reduced_clamped = clamp_i8(acc1_reduced);
-        printf("Writing Back %d, for out[%d]\n", (int)acc1_reduced_clamped, blockIdx * 128 + threadIdx * 2);
+        char acc1_reduced_clamped = convert_char_sat(acc1_reduced); // clamp_i8(acc1_reduced);
+        // printf("Writing Back %d, for out[%d]\n", (int)acc1_reduced_clamped, blockIdx * 128 + threadIdx * 2);
         out[blockIdx * 128 + threadIdx * 2] = acc1_reduced_clamped;
 
-        float acc2_reduced = (float)(acc2[0] + acc2[1] + acc2[2] + acc2[3]);
-        acc2_reduced *= in_scales[(blockIdx * (n / QBLOCK_SIZE) + blockIdy) * QBLOCK_SIZE / 2 + threadIdx * 2 + 1] * io_scale;
+        float scale2 = s[QBLOCK_ID + threadIdx * 2 + 1];
+        // printf("(%d, %d) - Scale2: %f\n", threadIdx, threadIdy, scale2);
+        float acc2_reduced = (float)(acc2.s0 + acc2.s1) * scale2 * io_scale;
         char acc2_reduced_clamped = clamp_i8(acc2_reduced);
-        printf("Writing Back %d, for out[%d]\n", (int)acc2_reduced_clamped, blockIdx * 128 + threadIdx * 2 + 1);
+        // printf("Writing Back %d, for out[%d]\n", (int)acc2_reduced_clamped, blockIdx * 128 + threadIdx * 2 + 1);
         out[blockIdx * 128 + threadIdx * 2 + 1] = acc2_reduced_clamped;
         // atomicAddClamp(out + blockIdx * 128 + threadIdx * 2 + 1, acc2_reduced);
     }

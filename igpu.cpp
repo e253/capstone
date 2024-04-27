@@ -33,21 +33,12 @@ const string cl_src = CL_SRC(
         }
     }
 
-    char clamp_i8(float x) {
-        if (x < -128.0f) {
-            x = -128.0f;
-        } else if (x > 127.0f) {
-            x = 127.0f;
-        }
-        return (char)x;
-    }
-
     void atomicAddClamp(__global char* ptr, float val) {
         char old = *ptr;
-        float next = clamp_i8((float)old + val);
+        char next = convert_char_sat((float)old + val);
         while (atomic_cmpxchg(ptr, old, next) != old) {
             old = *ptr;
-            next = clamp_i8((float)old + val);
+            next = convert_char_sat((float)old + val);
         }
     }
 
@@ -135,18 +126,25 @@ const string cl_src = CL_SRC(
         float scale1 = s[QBLOCK_ID + threadIdx * 2];
         // printf("(%d, %d) - Scale1: %f\n", threadIdx, threadIdy, scale1);
         float acc1_reduced = (float)(acc1.s0 + acc1.s1) * scale1 * io_scale;
+        while (true) {
+            char old = out[blockIdx * 128 + threadIdx * 2];
+            char next = convert_char_sat((float)old + acc1_reduced);
+            if (atomic_compare_exchange_strong(out + blockIdx * 128 + threadIdx * 2, &old, next)) {
+                break;
+            }
+        }
         // atomicAddClamp(out + blockIdx * 128 + threadIdx * 2, acc1_reduced);
-        char acc1_reduced_clamped = convert_char_sat(acc1_reduced); // clamp_i8(acc1_reduced);
-        // printf("Writing Back %d, for out[%d]\n", (int)acc1_reduced_clamped, blockIdx * 128 + threadIdx * 2);
-        out[blockIdx * 128 + threadIdx * 2] = acc1_reduced_clamped;
+        //  char acc1_reduced_clamped = convert_char_sat(acc1_reduced); // clamp_i8(acc1_reduced);
+        //   printf("Writing Back %d, for out[%d]\n", (int)acc1_reduced_clamped, blockIdx * 128 + threadIdx * 2);
+        //   out[blockIdx * 128 + threadIdx * 2] = acc1_reduced_clamped;
 
         float scale2 = s[QBLOCK_ID + threadIdx * 2 + 1];
         // printf("(%d, %d) - Scale2: %f\n", threadIdx, threadIdy, scale2);
         float acc2_reduced = (float)(acc2.s0 + acc2.s1) * scale2 * io_scale;
-        char acc2_reduced_clamped = clamp_i8(acc2_reduced);
+        char acc2_reduced_clamped = convert_char_sat(acc2_reduced);
         // printf("Writing Back %d, for out[%d]\n", (int)acc2_reduced_clamped, blockIdx * 128 + threadIdx * 2 + 1);
-        out[blockIdx * 128 + threadIdx * 2 + 1] = acc2_reduced_clamped;
-        // atomicAddClamp(out + blockIdx * 128 + threadIdx * 2 + 1, acc2_reduced);
+        // out[blockIdx * 128 + threadIdx * 2 + 1] = acc2_reduced_clamped;
+        atomicAddClamp(out + blockIdx * 128 + threadIdx * 2 + 1, acc2_reduced);
     }
 
 );

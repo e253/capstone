@@ -39,7 +39,7 @@ const string cl_src = CL_SRC(
         return (char)(x > 127.0f ? 127 : (x < -128.0f ? -128 : round(x)));
     }
 
-    __kernel void q4f32s_qi8f32s_offline_v1(
+    __kernel __attribute__((vec_type_hint(short4))) void q4f32s_qi8f32s_offline_v1(
         __global uchar2* restrict w,
         __global float* restrict s,
         __global uchar* restrict z,
@@ -59,6 +59,8 @@ const string cl_src = CL_SRC(
             // qblock-acc
             int2 acc1i = 0;
             int2 acc2i = 0;
+            // half4 acc1b = 0;
+            // half4 acc2b = 0;
             const int in_qblock = get_local_id(0) * n_blocks_per_thread + qblock;
 
             const int QBLOCK_ID = in_qblock * (n / QBLOCK_SIZE) + out_qblock;
@@ -72,6 +74,11 @@ const string cl_src = CL_SRC(
             for (int i = 0; i < 128; i += 4) {
                 // Load Input
                 short4 input = convert_short4(in[in_qblock * 128 / 4 + i / 4]); // `in` is char4*
+                // half4 input = convert_half4(in[in_qblock * 128 / 4 + i / 4]); // `in` is char4*
+                // if (i == 0 && row_sz2_block == 0) {
+                //     printf("input.s0: %f\n", (float)input.s0);
+                //     printf("_input.s1: %f\n", (float)_input.s1);
+                // }
 
                 // Load Weights
                 // block_offset = (in_qblock * 128)(row) * n/4(row_stride,uchar2,4 values) + (out_qblock * 128 / 4)(col,uchar2)
@@ -79,21 +86,34 @@ const string cl_src = CL_SRC(
                 uchar2 tmp1 = w[((in_qblock * 128 + row_sz2_block * 2) * n / 4 + (out_qblock * 128) / 4) + i / 4]; // check
                 uchar2 tmp2 = tmp1;
                 tmp1 >>= 4;
-                uchar4 weights1 = { tmp1, tmp2 };
-                weights1 &= (uchar4)0x0F;
+                uchar4 _weights1 = { tmp1, tmp2 };
+                _weights1 &= (uchar4)0x0F;
+                char4 weights1 = as_char4(_weights1); // safe becuase range is 0-15
 
                 // same as weights1 but row offset is row_sz2_block * 2 * n/4(row_stride,uchar2) + 1
                 uchar2 tmp3 = w[((in_qblock * 128 + row_sz2_block * 2 + 1) * n / 4 + (out_qblock * 128) / 4) + i / 4]; // check
                 uchar2 tmp4 = tmp3;
                 tmp3 >>= 4;
-                uchar4 weights2 = { tmp3, tmp4 };
-                weights2 &= (uchar4)0x0F;
+                uchar4 _weights2 = { tmp3, tmp4 };
+                _weights2 &= (uchar4)0x0F;
+                char4 weights2 = as_char4(_weights2); // safe becuase range is 0-15
 
-                weights1 -= zero1;
-                weights2 -= zero2;
+                weights1 -= as_char4(zero1); // safe becuase range is 0-15
+                weights2 -= as_char4(zero2);
 
                 short4 prod = convert_short4(weights1) * input;
                 short4 prod2 = convert_short4(weights2) * input;
+                // half4 hweights1 = convert_half4(weights1);
+                // if (i == 0 && row_sz2_block == 0) {
+                //     printf("hweights1.s0: %f\n", (float)hweights1.s0);
+                // }
+
+                // acc1b = mad(convert_half4(weights1), input, acc1b);
+                // acc2b = mad(convert_half4(weights2), input, acc2b);
+                //  if (i == 0 && row_sz2_block == 0) {
+                //      printf("acc1b.s0: %f\n", (float)acc1b.s0);
+                //      printf("try: %f\n", convert_half(weights1.s0) * input.s0);
+                //  }
 
                 acc1i += convert_int2(prod.lo) + convert_int2(prod.hi);
                 acc2i += convert_int2(prod2.lo) + convert_int2(prod2.hi);
@@ -101,6 +121,8 @@ const string cl_src = CL_SRC(
 
             acc1 += (float)(acc1i.s0 + acc1i.s1) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2] * in_scales[in_qblock]; // check s
             acc2 += (float)(acc2i.s0 + acc2i.s1) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2 + 1] * in_scales[in_qblock]; // check s
+            // acc1 += (float)(acc1b.s0 + acc1b.s1 + acc1b.s2 + acc1b.s3) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2] * in_scales[in_qblock]; // check s
+            // acc2 += (float)(acc2b.s0 + acc2b.s1 + acc2b.s2 + acc2b.s3) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2 + 1] * in_scales[in_qblock]; // check s
         } // qblock
 
         __local float acc1_local[2][64];
@@ -406,9 +428,57 @@ void test_512x512_input()
         }
         SVMUNMAP(queue, out);
         if (passed) {
-            cout << "Test 2 Passed!" << endl;
+            cout << "Test 3 Passed!" << endl;
         } else {
-            cout << "Test 2 Failed!" << endl;
+            cout << "Test 3 Failed!" << endl;
+        }
+    }
+
+    // 4 trivial - but 0 values after adjustment
+    {
+        SVMMAP(queue, w, m * n / 2);
+        BROADCAST(w, m * n / 2, 0x00);
+        SVMUNMAP(queue, w);
+
+        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
+        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
+        SVMUNMAP(queue, s);
+
+        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x44);
+        SVMUNMAP(queue, z);
+
+        SVMMAP(queue, in, n);
+        BROADCAST(in, n, 2);
+        SVMUNMAP(queue, in);
+
+        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
+        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
+        SVMUNMAP(queue, in_scales);
+
+        SVMMAP(queue, out, m);
+        memset(out, 0, m);
+        SVMUNMAP(queue, out);
+
+        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
+        BROADCAST(out_scales, m / QBLOCK_SIZE, 81.92f);
+        SVMUNMAP(queue, out_scales);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        SVMMAP(queue, out, m);
+        bool passed = true;
+        for (int i = 0; i < m; i++) {
+            if (out[i] != -100) {
+                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
+                passed = false;
+            }
+        }
+        SVMUNMAP(queue, out);
+        if (passed) {
+            cout << "Test 4 Passed!" << endl;
+        } else {
+            cout << "Test 4 Failed!" << endl;
         }
     }
 

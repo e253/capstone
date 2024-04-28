@@ -59,10 +59,7 @@ const string cl_src = CL_SRC(
             // qblock-acc
             int2 acc1i = 0;
             int2 acc2i = 0;
-            // half4 acc1b = 0;
-            // half4 acc2b = 0;
             const int in_qblock = get_local_id(0) * n_blocks_per_thread + qblock;
-
             const int QBLOCK_ID = in_qblock * (n / QBLOCK_SIZE) + out_qblock;
 
             // Set Zeros
@@ -74,11 +71,6 @@ const string cl_src = CL_SRC(
             for (int i = 0; i < 128; i += 4) {
                 // Load Input
                 short4 input = convert_short4(in[in_qblock * 128 / 4 + i / 4]); // `in` is char4*
-                // half4 input = convert_half4(in[in_qblock * 128 / 4 + i / 4]); // `in` is char4*
-                // if (i == 0 && row_sz2_block == 0) {
-                //     printf("input.s0: %f\n", (float)input.s0);
-                //     printf("_input.s1: %f\n", (float)_input.s1);
-                // }
 
                 // Load Weights
                 // block_offset = (in_qblock * 128)(row) * n/4(row_stride,uchar2,4 values) + (out_qblock * 128 / 4)(col,uchar2)
@@ -103,17 +95,6 @@ const string cl_src = CL_SRC(
 
                 short4 prod = convert_short4(weights1) * input;
                 short4 prod2 = convert_short4(weights2) * input;
-                // half4 hweights1 = convert_half4(weights1);
-                // if (i == 0 && row_sz2_block == 0) {
-                //     printf("hweights1.s0: %f\n", (float)hweights1.s0);
-                // }
-
-                // acc1b = mad(convert_half4(weights1), input, acc1b);
-                // acc2b = mad(convert_half4(weights2), input, acc2b);
-                //  if (i == 0 && row_sz2_block == 0) {
-                //      printf("acc1b.s0: %f\n", (float)acc1b.s0);
-                //      printf("try: %f\n", convert_half(weights1.s0) * input.s0);
-                //  }
 
                 acc1i += convert_int2(prod.lo) + convert_int2(prod.hi);
                 acc2i += convert_int2(prod2.lo) + convert_int2(prod2.hi);
@@ -121,8 +102,6 @@ const string cl_src = CL_SRC(
 
             acc1 += (float)(acc1i.s0 + acc1i.s1) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2] * in_scales[in_qblock]; // check s
             acc2 += (float)(acc2i.s0 + acc2i.s1) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2 + 1] * in_scales[in_qblock]; // check s
-            // acc1 += (float)(acc1b.s0 + acc1b.s1 + acc1b.s2 + acc1b.s3) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2] * in_scales[in_qblock]; // check s
-            // acc2 += (float)(acc2b.s0 + acc2b.s1 + acc2b.s2 + acc2b.s3) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2 + 1] * in_scales[in_qblock]; // check s
         } // qblock
 
         __local float acc1_local[2][64];

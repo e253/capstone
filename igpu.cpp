@@ -461,6 +461,54 @@ void test_512x512_input()
         }
     }
 
+    // 5 - Trivial, but the out scale is too small to prevent int8 overflow
+    {
+        SVMMAP(queue, w, m * n / 2);
+        BROADCAST(w, m * n / 2, 0x00);
+        SVMUNMAP(queue, w);
+
+        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
+        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
+        SVMUNMAP(queue, s);
+
+        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x44);
+        SVMUNMAP(queue, z);
+
+        SVMMAP(queue, in, n);
+        BROADCAST(in, n, 2);
+        SVMUNMAP(queue, in);
+
+        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
+        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
+        SVMUNMAP(queue, in_scales);
+
+        SVMMAP(queue, out, m);
+        memset(out, 0, m);
+        SVMUNMAP(queue, out);
+
+        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
+        BROADCAST(out_scales, m / QBLOCK_SIZE, 1.0f);
+        SVMUNMAP(queue, out_scales);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        SVMMAP(queue, out, m);
+        bool passed = true;
+        for (int i = 0; i < m; i++) {
+            if (out[i] != -128) {
+                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
+                passed = false;
+            }
+        }
+        SVMUNMAP(queue, out);
+        if (passed) {
+            cout << "Test 5 Passed!" << endl;
+        } else {
+            cout << "Test 5 Failed!" << endl;
+        }
+    }
+
     clSVMFree(context, w);
     clSVMFree(context, s);
     clSVMFree(context, z);

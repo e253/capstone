@@ -47,11 +47,11 @@ const string cl_src = CL_SRC(
         __global char* restrict out,
         __global float* restrict out_scales,
         int m, int n, int n_blocks_per_thread) {
-        printf(
-            "In Block: %d-%d, OutBlock: %d, RowSz2Block: %d\n",
-            get_local_id(0) * n_blocks_per_thread,
-            get_local_id(0) * n_blocks_per_thread + n_blocks_per_thread - 1,
-            get_global_id(2), get_local_id(1));
+        // printf(
+        //     "In Block: %d-%d, OutBlock: %d, RowSz2Block: %d\n",
+        //     get_local_id(0) * n_blocks_per_thread,
+        //     get_local_id(0) * n_blocks_per_thread + n_blocks_per_thread - 1,
+        //     get_global_id(2), get_local_id(1));
 
         const int QBLOCK_SIZE = 128;
         const int row_sz2_block = get_local_id(1);

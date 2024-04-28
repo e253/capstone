@@ -38,7 +38,7 @@ const string cl_src = CL_SRC(
         return (char)(x > 127.0f ? 127 : (x < -128.0f ? -128 : round(x)));
     }
 
-    __kernel __attribute__((intel_reqd_sub_group_size(8))) void q4f32s_qi8f32s_offline_v1(
+    __kernel void q4f32s_qi8f32s_offline_v1(
         __global uchar2* restrict w,
         __global float* restrict s,
         __global uchar* restrict z,
@@ -47,9 +47,15 @@ const string cl_src = CL_SRC(
         __global char* restrict out,
         __global float* restrict out_scales,
         int m, int n, int n_blocks_per_thread) {
+        printf(
+            "In Block: %d-%d, OutBlock: %d, RowSz2Block: %d\n",
+            get_local_id(0) * n_blocks_per_thread,
+            get_local_id(0) * n_blocks_per_thread + n_blocks_per_thread - 1,
+            get_global_id(2), get_local_id(1));
+
         const int QBLOCK_SIZE = 128;
         const int row_sz2_block = get_local_id(1);
-        const int out_qblock = get_group_id(2);
+        const int out_qblock = get_global_id(2);
 
         float acc1 = 0;
         float acc2 = 0;
@@ -58,31 +64,31 @@ const string cl_src = CL_SRC(
             // qblock-acc
             int2 acc1i = 0;
             int2 acc2i = 0;
-            const int in_qblock = get_local_id(0) + qblock;
+            const int in_qblock = get_local_id(0) * n_blocks_per_thread + qblock;
 
-            int QBLOCK_ID = in_qblock * (n / QBLOCK_SIZE) + out_qblock;
+            const int QBLOCK_ID = in_qblock * (n / QBLOCK_SIZE) + out_qblock;
 
             // Set Zeros
-            uchar zero12 = z[QBLOCK_ID * QBLOCK_SIZE / 2 + row_sz2_block * 2 / 2]; // check
+            uchar zero12 = z[QBLOCK_ID * QBLOCK_SIZE / 2 + row_sz2_block * 2 / 2];
             uchar tmp = zero12;
             uchar4 zero1 = (uchar4)((zero12 >> 4) & 0x0F);
             uchar4 zero2 = (uchar4)(tmp & 0x0F);
 
-            for (int i = 0; i < 128 / 4; i++) {
+            for (int i = 0; i < 128; i += 4) {
                 // Load Input
-                short4 input = convert_short4(in[in_qblock * 128 + i]); // check
+                short4 input = convert_short4(in[in_qblock * 128 / 4 + i / 4]); // `in` is char4*
 
                 // Load Weights
-                // block_offset = (in_qblock * 128)(row) * n/2(row_stride) + (out_qblock * 128)(col)
-                // row_offset = row_sz2_block * 2 * n/2(row_stride)
-                uchar2 tmp1 = w[((in_qblock * 128 + row_sz2_block * 2) * n / 2 + (out_qblock * 128)) + i]; // check
+                // block_offset = (in_qblock * 128)(row) * n/4(row_stride,uchar2,4 values) + (out_qblock * 128 / 4)(col,uchar2)
+                // row_offset = row_sz2_block * 2 * n/4(row_stride,uchar2,4 values)
+                uchar2 tmp1 = w[((in_qblock * 128 + row_sz2_block * 2) * n / 4 + (out_qblock * 128) / 4) + i / 4]; // check
                 uchar2 tmp2 = tmp1;
                 tmp1 >>= 4;
                 uchar4 weights1 = { tmp1, tmp2 };
                 weights1 &= (uchar4)0x0F;
 
-                // same as weights1 but row offset is row_sz2_block * 2 * n/2(row_stride) + 1
-                uchar2 tmp3 = w[((in_qblock * 128 + row_sz2_block * 2 + 1) * n / 2 + (out_qblock * 128)) + i]; // check
+                // same as weights1 but row offset is row_sz2_block * 2 * n/4(row_stride,uchar2) + 1
+                uchar2 tmp3 = w[((in_qblock * 128 + row_sz2_block * 2 + 1) * n / 4 + (out_qblock * 128) / 4) + i / 4]; // check
                 uchar2 tmp4 = tmp3;
                 tmp3 >>= 4;
                 uchar4 weights2 = { tmp3, tmp4 };
@@ -92,9 +98,9 @@ const string cl_src = CL_SRC(
                 weights2 -= zero2;
 
                 short4 prod = convert_short4(weights1) * input;
-                acc1i += convert_int2(prod.lo) + convert_int2(prod.hi);
-
                 short4 prod2 = convert_short4(weights2) * input;
+
+                acc1i += convert_int2(prod.lo) + convert_int2(prod.hi);
                 acc2i += convert_int2(prod2.lo) + convert_int2(prod2.hi);
             } // block process
 
@@ -102,11 +108,20 @@ const string cl_src = CL_SRC(
             acc2 += (float)(acc2i.s0 + acc2i.s1) * s[QBLOCK_ID + row_sz2_block * 2 + 1] * in_scales[in_qblock]; // check s
         } // qblock
 
-        sub_group_reduce_add(acc1);
-        sub_group_reduce_add(acc2);
+        __local float acc1_local[2][64];
+        __local float acc2_local[2][64];
+        acc1_local[get_local_id(0)][row_sz2_block] = acc1;
+        acc2_local[get_local_id(0)][row_sz2_block] = acc2;
 
-        out[out_qblock * 128 + row_sz2_block * 2] = clamp((float)out[out_qblock * 128 + row_sz2_block * 2] + acc1 / out_scales[out_qblock]); // check out_scales
-        out[out_qblock * 128 + row_sz2_block * 2 + 1] = clamp((float)out[out_qblock * 128 + row_sz2_block * 2 + 1] + acc2 / out_scales[out_qblock]); // check out_scales
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        if (get_local_id(0) == 0) {
+            acc1 = acc1_local[0][row_sz2_block] + acc1_local[1][row_sz2_block];
+            acc2 = acc2_local[0][row_sz2_block] + acc2_local[1][row_sz2_block];
+            // printf("Out Block: %d, RowSz2Block: %d, Acc1: %f, Acc2: %f\n", out_qblock, row_sz2_block, acc1, acc2);
+            out[out_qblock * 128 + row_sz2_block * 2] = clamp(acc1 / out_scales[out_qblock]); // check out_scales
+            out[out_qblock * 128 + row_sz2_block * 2 + 1] = clamp(acc2 / out_scales[out_qblock]); // check out_scales
+        }
     });
 
 // DO NOT CALL FROM MULTIPLE THREADS!
@@ -143,7 +158,7 @@ void q4f32s_qi8f32s_egemv_offline(
     CL_CHECK(clStatus, "clSetKernelArg - m")
     clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 8, sizeof(int), &n);
     CL_CHECK(clStatus, "clSetKernelArg - n")
-    int n_blocks_per_thread = n / 4 / 128;
+    int n_blocks_per_thread = n / 2 / 128;
     clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 9, sizeof(int), &n_blocks_per_thread);
     CL_CHECK(clStatus, "clSetKernelArg - n_blocks_per_thread")
 
@@ -151,23 +166,26 @@ void q4f32s_qi8f32s_egemv_offline(
     const size_t _m = m;
     const size_t _n = n;
     // global work size is the number of work items in each dimension
-    const size_t global_work_size[] = { 4, _m / 128 * 64, _m / 128 };
+    const size_t global_work_size[] = { 2, _m / 128 * 64, _m / 128 };
     // local work size is the number of work items in each work group
-    const size_t local_work_size[] = { 4, 64, 1 };
+    const size_t local_work_size[] = { 2, 64, 1 };
     // n work groups per dimension is found by dividing the global work size by the local work size
     // in each dimension
     // wg_id = { 0, 0-_m/128, 0-_m/128 }
+    // each row is split in two halfs
+    // each out_block is split into 64 threads doing 2 rows each.
     clStatus = clEnqueueNDRangeKernel(
         queue, q4f32s_qi8f32s_offline_v1_kernel,
-        2, nullptr,
+        3, nullptr,
         global_work_size, local_work_size,
         0, nullptr, &event);
     CL_CHECK(clStatus, "q4f32s_qi8f32s_offline_v1_kernel invocation")
 
     clStatus = clWaitForEvents(1, &event);
-    CL_CHECK(clStatus, "clWaitForEvents")
+    CL_CHECK(clStatus, "clWaitForEvents - q4f32s_qi8f32s_offline_v1_kernel")
 
-    clFinish(queue);
+    clStatus = clFinish(queue);
+    CL_CHECK(clStatus, "clFinish - q4f32s_qi8f32s_offline_v1_kernel")
 }
 
 void test_vec_add()
@@ -232,7 +250,7 @@ void test_vec_add()
     clSVMFree(context, c);
 }
 
-void test_128x128_input()
+void test_512x512_input()
 {
     const int m = 512;
     const int n = 512;
@@ -263,16 +281,16 @@ void test_128x128_input()
         BROADCAST(in, n, 2);
         SVMUNMAP(queue, in);
 
-        SVMMAP(queue, in_scales, 1);
-        in_scales[0] = 1.0f;
+        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
+        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
         SVMUNMAP(queue, in_scales);
 
         SVMMAP(queue, out, m);
         memset(out, 0, m);
         SVMUNMAP(queue, out);
 
-        SVMMAP(queue, out_scales, 1);
-        out_scales[0] = 81.92f;
+        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
+        BROADCAST(out_scales, m / QBLOCK_SIZE, 81.92f);
         SVMUNMAP(queue, out_scales);
 
         q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
@@ -360,8 +378,8 @@ int main()
     test_vec_add();
 
     cout << endl
-         << "Testing 128x128 input..." << endl;
-    test_128x128_input();
+         << "Testing 512x512 input..." << endl;
+    test_512x512_input();
 
     // cleanup
     clReleaseKernel(vec_add_kernel);

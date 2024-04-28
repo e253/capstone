@@ -48,12 +48,6 @@ const string cl_src = CL_SRC(
         __global char* restrict out,
         __global float* restrict out_scales,
         int m, int n, int n_blocks_per_thread) {
-        // printf(
-        //     "In Block: %d-%d, OutBlock: %d, RowSz2Block: %d\n",
-        //     get_local_id(0) * n_blocks_per_thread,
-        //     get_local_id(0) * n_blocks_per_thread + n_blocks_per_thread - 1,
-        //     get_global_id(2), get_local_id(1));
-
         const int QBLOCK_SIZE = 128;
         const int row_sz2_block = get_local_id(1);
         const int out_qblock = get_global_id(2);
@@ -166,7 +160,7 @@ void q4f32s_qi8f32s_egemv_offline(
     const size_t _m = m;
     const size_t _n = n;
     // global work size is the number of work items in each dimension
-    const size_t global_work_size[] = { 2, _m / 128 * 64, _m / 128 };
+    const size_t global_work_size[] = { 2, 64, _m / 128 };
     // local work size is the number of work items in each work group
     const size_t local_work_size[] = { 2, 64, 1 };
     // n work groups per dimension is found by dividing the global work size by the local work size
@@ -356,6 +350,56 @@ void test_512x512_input()
         bool passed = true;
         for (int i = 0; i < m; i++) {
             if (out[i] != round((i % QBLOCK_SIZE + 1) * 4096 / 5242.88f)) {
+                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
+                passed = false;
+            }
+        }
+        SVMUNMAP(queue, out);
+        if (passed) {
+            cout << "Test 2 Passed!" << endl;
+        } else {
+            cout << "Test 2 Failed!" << endl;
+        }
+    }
+
+    // 3 - trivial, but different input scales
+    {
+        SVMMAP(queue, w, m * n / 2);
+        BROADCAST(w, m * n / 2, 0x55);
+        SVMUNMAP(queue, w);
+
+        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
+        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
+        SVMUNMAP(queue, s);
+
+        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
+        SVMUNMAP(queue, z);
+
+        SVMMAP(queue, in, n);
+        BROADCAST(in, n, 2);
+        SVMUNMAP(queue, in);
+
+        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
+        for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+            in_scales[i] = (float)(i + 1);
+        }
+        SVMUNMAP(queue, in_scales);
+
+        SVMMAP(queue, out, m);
+        memset(out, 0, m);
+        SVMUNMAP(queue, out);
+
+        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
+        BROADCAST(out_scales, m / QBLOCK_SIZE, 204.8f);
+        SVMUNMAP(queue, out_scales);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        SVMMAP(queue, out, m);
+        bool passed = true;
+        for (int i = 0; i < m; i++) {
+            if (out[i] != 100) {
                 cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
                 passed = false;
             }

@@ -38,7 +38,7 @@ const string cl_src = CL_SRC(
         return (char)(x > 127.0f ? 127 : (x < -128.0f ? -128 : round(x)));
     }
 
-    __kernel __attribute__((intel_reqd_sub_group_size(32))) void q4f32s_qi8f32s_offline_v1(
+    __kernel __attribute__((intel_reqd_sub_group_size(8))) void q4f32s_qi8f32s_offline_v1(
         __global uchar2* restrict w,
         __global float* restrict s,
         __global uchar* restrict z,
@@ -46,12 +46,10 @@ const string cl_src = CL_SRC(
         __global float* restrict in_scales,
         __global char* restrict out,
         __global float* restrict out_scales,
-        int m, int n, int n_blocks_per_thread, int n_rows_per_thread) {
+        int m, int n, int n_blocks_per_thread) {
         const int QBLOCK_SIZE = 128;
-        const int blockIdx = get_group_id(0);
-        const int blockIdy = get_group_id(1);
-        const int threadIdx = get_local_id(0);
-        const int threadIdy = get_local_id(1);
+        const int row_sz2_block = get_local_id(1);
+        const int out_qblock = get_group_id(2);
 
         float acc1 = 0;
         float acc2 = 0;
@@ -60,27 +58,31 @@ const string cl_src = CL_SRC(
             // qblock-acc
             int2 acc1i = 0;
             int2 acc2i = 0;
+            const int in_qblock = get_local_id(0) + qblock;
 
-            int QBLOCK_ID = blockIdx * (n / QBLOCK_SIZE) + (blockIdy + qblock);
+            int QBLOCK_ID = in_qblock * (n / QBLOCK_SIZE) + out_qblock;
 
             // Set Zeros
-            uchar zero12 = z[QBLOCK_ID * QBLOCK_SIZE / 2 + threadIdx]; // check
+            uchar zero12 = z[QBLOCK_ID * QBLOCK_SIZE / 2 + row_sz2_block * 2 / 2]; // check
             uchar tmp = zero12;
             uchar4 zero1 = (uchar4)((zero12 >> 4) & 0x0F);
             uchar4 zero2 = (uchar4)(tmp & 0x0F);
 
             for (int i = 0; i < 128 / 4; i++) {
                 // Load Input
-                short4 input = convert_short4(in[blockIdy * 128 + i]); // check
+                short4 input = convert_short4(in[in_qblock * 128 + i]); // check
 
                 // Load Weights
-                uchar2 tmp1 = w[(blockIdx * 128 * n / 2 + blockIdy * 128) + i]; // check
+                // block_offset = (in_qblock * 128)(row) * n/2(row_stride) + (out_qblock * 128)(col)
+                // row_offset = row_sz2_block * 2 * n/2(row_stride)
+                uchar2 tmp1 = w[((in_qblock * 128 + row_sz2_block * 2) * n / 2 + (out_qblock * 128)) + i]; // check
                 uchar2 tmp2 = tmp1;
                 tmp1 >>= 4;
                 uchar4 weights1 = { tmp1, tmp2 };
                 weights1 &= (uchar4)0x0F;
 
-                uchar2 tmp3 = w[0]; // check
+                // same as weights1 but row offset is row_sz2_block * 2 * n/2(row_stride) + 1
+                uchar2 tmp3 = w[((in_qblock * 128 + row_sz2_block * 2 + 1) * n / 2 + (out_qblock * 128)) + i]; // check
                 uchar2 tmp4 = tmp3;
                 tmp3 >>= 4;
                 uchar4 weights2 = { tmp3, tmp4 };
@@ -96,20 +98,16 @@ const string cl_src = CL_SRC(
                 acc2i += convert_int2(prod2.lo) + convert_int2(prod2.hi);
             } // block process
 
-            acc1 += (float)(acc1i.s0 + acc1i.s1) * s[QBLOCK_ID + threadIdx * 2] * in_scales[blockIdy + qBlock]; // check s
-            acc2 += (float)(acc2i.s0 + acc2i.s1) * s[QBLOCK_ID + threadIdx * 2 + 1] * in_scales[blockIdy + qBlock]; // check s
+            acc1 += (float)(acc1i.s0 + acc1i.s1) * s[QBLOCK_ID + row_sz2_block * 2] * in_scales[in_qblock]; // check s
+            acc2 += (float)(acc2i.s0 + acc2i.s1) * s[QBLOCK_ID + row_sz2_block * 2 + 1] * in_scales[in_qblock]; // check s
         } // qblock
 
         sub_group_reduce_add(acc1);
         sub_group_reduce_add(acc2);
 
-        if (get_local_id(0) == 0) { // check if
-            out[blockIdx * 128 + threadIdx * 2] = convert_char_sat(acc1 / out_scales[blockIdx]); // check out_scales
-            out[blockIdx * 128 + threadIdx * 2 + 1] = convert_char_sat(acc2 / out_scales[blockIdx]); // check out_scales
-        }
-    }
-
-);
+        out[out_qblock * 128 + row_sz2_block * 2] = clamp((float)out[out_qblock * 128 + row_sz2_block * 2] + acc1 / out_scales[out_qblock]); // check out_scales
+        out[out_qblock * 128 + row_sz2_block * 2 + 1] = clamp((float)out[out_qblock * 128 + row_sz2_block * 2 + 1] + acc2 / out_scales[out_qblock]); // check out_scales
+    });
 
 // DO NOT CALL FROM MULTIPLE THREADS!
 void q4f32s_qi8f32s_egemv_offline(
@@ -122,9 +120,9 @@ void q4f32s_qi8f32s_egemv_offline(
     float* out_scales,
     int m, int n)
 {
-    assert(m >= 128 && n >= 128 && "m and n must be at least 128");
-    assert(m <= 16384 && n <= 16384 && "m and n can be at most 16384");
-    assert(m % 128 == 0 && n % 128 == 0 && "m and n must be multiples of 128");
+    assert(m >= 512 && n >= 512 && "m and n must be at least 128");
+    assert(m <= 32768 && n <= 32768 && "m and n can be at most 16384");
+    assert(m % 512 == 0 && n % 512 == 0 && "m and n must be multiples of 128");
 
     cl_int clStatus;
     clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 0, w);
@@ -145,33 +143,20 @@ void q4f32s_qi8f32s_egemv_offline(
     CL_CHECK(clStatus, "clSetKernelArg - m")
     clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 8, sizeof(int), &n);
     CL_CHECK(clStatus, "clSetKernelArg - n")
-
-    int n_cols_per_thread = n / 32; // n / WARP_SIZE
-    if (n_cols_per_thread < 128) {
-        n_cols_per_thread = 128;
-    } else if (n_cols_per_thread < 256) {
-        n_cols_per_thread = 256;
-    } else if (n_cols_per_thread < 512) {
-        n_cols_per_thread = 512;
-    }
-
+    int n_blocks_per_thread = n / 4 / 128;
     clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 9, sizeof(int), &n_blocks_per_thread);
     CL_CHECK(clStatus, "clSetKernelArg - n_blocks_per_thread")
-
-    n_colwise_threads = n / n_cols_per_thread;
-    n_available_row_threads_per_wg = 256 / n_colwise_threads;
-    n_rows_per_thread = m / 256;
-    // find correct assignment of n_rows_per_thread s.t. n_rows_per_thread_per_wg * n_colwise_threads <= 256
 
     cl_event event;
     const size_t _m = m;
     const size_t _n = n;
     // global work size is the number of work items in each dimension
-    const size_t global_work_size[] = { (_m / 128) * 64, _n / 128 };
+    const size_t global_work_size[] = { 4, _m / 128 * 64, _m / 128 };
     // local work size is the number of work items in each work group
-    const size_t local_work_size[] = { 64, 1 };
+    const size_t local_work_size[] = { 4, 64, 1 };
     // n work groups per dimension is found by dividing the global work size by the local work size
     // in each dimension
+    // wg_id = { 0, 0-_m/128, 0-_m/128 }
     clStatus = clEnqueueNDRangeKernel(
         queue, q4f32s_qi8f32s_offline_v1_kernel,
         2, nullptr,
@@ -181,6 +166,8 @@ void q4f32s_qi8f32s_egemv_offline(
 
     clStatus = clWaitForEvents(1, &event);
     CL_CHECK(clStatus, "clWaitForEvents")
+
+    clFinish(queue);
 }
 
 void test_vec_add()
@@ -247,8 +234,8 @@ void test_vec_add()
 
 void test_128x128_input()
 {
-    const int m = 128;
-    const int n = 128;
+    const int m = 512;
+    const int n = 512;
 
     uint8_t* w = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / 2, 64);
     float* s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE * sizeof(float), 64);
@@ -285,7 +272,7 @@ void test_128x128_input()
         SVMUNMAP(queue, out);
 
         SVMMAP(queue, out_scales, 1);
-        out_scales[0] = 20.48f;
+        out_scales[0] = 81.92f;
         SVMUNMAP(queue, out_scales);
 
         q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);

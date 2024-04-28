@@ -1,5 +1,6 @@
 #include <CL/cl.h>
 #include <cassert>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -104,8 +105,8 @@ const string cl_src = CL_SRC(
                 acc2i += convert_int2(prod2.lo) + convert_int2(prod2.hi);
             } // block process
 
-            acc1 += (float)(acc1i.s0 + acc1i.s1) * s[QBLOCK_ID + row_sz2_block * 2] * in_scales[in_qblock]; // check s
-            acc2 += (float)(acc2i.s0 + acc2i.s1) * s[QBLOCK_ID + row_sz2_block * 2 + 1] * in_scales[in_qblock]; // check s
+            acc1 += (float)(acc1i.s0 + acc1i.s1) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2] * in_scales[in_qblock]; // check s
+            acc2 += (float)(acc2i.s0 + acc2i.s1) * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2 + 1] * in_scales[in_qblock]; // check s
         } // qblock
 
         __local float acc1_local[2][64];
@@ -118,7 +119,6 @@ const string cl_src = CL_SRC(
         if (get_local_id(0) == 0) {
             acc1 = acc1_local[0][row_sz2_block] + acc1_local[1][row_sz2_block];
             acc2 = acc2_local[0][row_sz2_block] + acc2_local[1][row_sz2_block];
-            // printf("Out Block: %d, RowSz2Block: %d, Acc1: %f, Acc2: %f\n", out_qblock, row_sz2_block, acc1, acc2);
             out[out_qblock * 128 + row_sz2_block * 2] = clamp(acc1 / out_scales[out_qblock]); // check out_scales
             out[out_qblock * 128 + row_sz2_block * 2 + 1] = clamp(acc2 / out_scales[out_qblock]); // check out_scales
         }
@@ -183,6 +183,8 @@ void q4f32s_qi8f32s_egemv_offline(
 
     clStatus = clWaitForEvents(1, &event);
     CL_CHECK(clStatus, "clWaitForEvents - q4f32s_qi8f32s_offline_v1_kernel")
+    clStatus = clReleaseEvent(event);
+    CL_CHECK(clStatus, "clReleaseEvent - q4f32s_qi8f32s_offline_v1_kernel")
 
     clStatus = clFinish(queue);
     CL_CHECK(clStatus, "clFinish - q4f32s_qi8f32s_offline_v1_kernel")
@@ -308,6 +310,61 @@ void test_512x512_input()
             cout << "Test 1 Passed!" << endl;
         } else {
             cout << "Test 1 Failed!" << endl;
+        }
+    }
+
+    // 2 - unique weight scales, ensure proper loading
+    {
+        SVMMAP(queue, w, m * n / 2);
+        BROADCAST(w, m * n / 2, 0x55);
+        SVMUNMAP(queue, w);
+
+        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
+        for (int out_qblock = 0; out_qblock < m / QBLOCK_SIZE; out_qblock++) {
+            for (int in_qblock = 0; in_qblock < n / QBLOCK_SIZE; in_qblock++) {
+                int qblock_id = out_qblock * n / QBLOCK_SIZE + in_qblock;
+                for (int el = 0; el < QBLOCK_SIZE; el++) {
+                    s[qblock_id * QBLOCK_SIZE + el] = (float)(el + 1);
+                }
+            }
+        }
+        SVMUNMAP(queue, s);
+
+        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
+        SVMUNMAP(queue, z);
+
+        SVMMAP(queue, in, n);
+        BROADCAST(in, n, 2);
+        SVMUNMAP(queue, in);
+
+        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
+        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
+        SVMUNMAP(queue, in_scales);
+
+        SVMMAP(queue, out, m);
+        memset(out, 0, m);
+        SVMUNMAP(queue, out);
+
+        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
+        BROADCAST(out_scales, m / QBLOCK_SIZE, 5242.88f);
+        SVMUNMAP(queue, out_scales);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        SVMMAP(queue, out, m);
+        bool passed = true;
+        for (int i = 0; i < m; i++) {
+            if (out[i] != round((i % QBLOCK_SIZE + 1) * 4096 / 5242.88f)) {
+                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
+                passed = false;
+            }
+        }
+        SVMUNMAP(queue, out);
+        if (passed) {
+            cout << "Test 2 Passed!" << endl;
+        } else {
+            cout << "Test 2 Failed!" << endl;
         }
     }
 

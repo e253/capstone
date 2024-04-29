@@ -738,15 +738,14 @@ void test_dim_fuzz()
                         passed = false;
                     }
                 }
-                if (passed) {
-                    cout << "Fuzz Test 1 Passed for dim: " << m << ", " << n << endl;
-                } else {
+                if (!passed) {
                     cout << "Fuzz Test 1 Failed for dim: " << m << ", " << n << endl;
                     cout << "Output scale: " << _os << endl;
                     cout << "Expected: " << expected << endl;
                     exit(0);
                 }
             }
+            cout << "Fuzz Test 1 Passed for dim: " << m << ", ?" << endl;
         }
     }
 
@@ -759,9 +758,16 @@ void test_dim_fuzz()
     _mm_free(out_scales);
 }
 
-int main()
+int main(int argc, char** argv)
 {
     test_128x512_offline();
     test_offline_egemv();
-    test_dim_fuzz();
+
+    if (argc == 2) {
+        if (string(argv[1]) == "fuzz") {
+            cout << "Fuzzing tests across all supported input dimensions ..." << endl;
+            cout << "This will take a long time" << endl;
+            test_dim_fuzz();
+        }
+    }
 }

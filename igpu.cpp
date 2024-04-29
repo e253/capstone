@@ -52,6 +52,10 @@ const string cl_src = CL_SRC(
         const int row_sz2_block = get_local_id(1);
         const int out_qblock = get_global_id(2);
 
+        // if (row_sz2_block == 0 && out_qblock == 0) {
+        //     printf("Acknowledging: %d\n", get_local_id(0));
+        // }
+
         float acc1 = 0;
         float acc2 = 0;
 
@@ -60,7 +64,7 @@ const string cl_src = CL_SRC(
             int2 acc1i = 0;
             int2 acc2i = 0;
             const int in_qblock = get_local_id(0) * n_blocks_per_thread + qblock;
-            const int QBLOCK_ID = in_qblock * (n / QBLOCK_SIZE) + out_qblock;
+            const int QBLOCK_ID = out_qblock * (n / QBLOCK_SIZE) + in_qblock;
 
             // Set Zeros
             uchar zero12 = z[QBLOCK_ID * QBLOCK_SIZE / 2 + row_sz2_block * 2 / 2];
@@ -73,9 +77,9 @@ const string cl_src = CL_SRC(
                 short4 input = convert_short4(in[in_qblock * 128 / 4 + i / 4]); // `in` is char4*
 
                 // Load Weights
-                // block_offset = (in_qblock * 128)(row) * n/4(row_stride,uchar2,4 values) + (out_qblock * 128 / 4)(col,uchar2)
+                // block_offset = (out_qblock * 128)(row) * n/4(row_stride,2 vals / byte, 2 bytes per index) + (in_qblock * 128 / 4)(col,uchar2, 2 vals per byte)
                 // row_offset = row_sz2_block * 2 * n/4(row_stride,uchar2,4 values)
-                uchar2 tmp1 = w[((in_qblock * 128 + row_sz2_block * 2) * n / 4 + (out_qblock * 128) / 4) + i / 4]; // check
+                uchar2 tmp1 = w[((out_qblock * 128 + row_sz2_block * 2) * n / 4 + (in_qblock * 128) / 4) + i / 4]; // check
                 uchar2 tmp2 = tmp1;
                 tmp1 >>= 4;
                 uchar4 _weights1 = { tmp1, tmp2 };
@@ -83,7 +87,7 @@ const string cl_src = CL_SRC(
                 char4 weights1 = as_char4(_weights1); // safe becuase range is 0-15
 
                 // same as weights1 but row offset is row_sz2_block * 2 * n/4(row_stride,uchar2) + 1
-                uchar2 tmp3 = w[((in_qblock * 128 + row_sz2_block * 2 + 1) * n / 4 + (out_qblock * 128) / 4) + i / 4]; // check
+                uchar2 tmp3 = w[((out_qblock * 128 + row_sz2_block * 2 + 1) * n / 4 + (in_qblock * 128) / 4) + i / 4]; // check
                 uchar2 tmp4 = tmp3;
                 tmp3 >>= 4;
                 uchar4 _weights2 = { tmp3, tmp4 };
@@ -166,7 +170,7 @@ void q4f32s_qi8f32s_egemv_offline(
     const size_t local_work_size[] = { 2, 64, 1 };
     // n work groups per dimension is found by dividing the global work size by the local work size
     // in each dimension
-    // wg_id = { 0, 0-_m/128, 0-_m/128 }
+    // local_id = { 0-1, 0-63, 0-m/128 - 1 }
     // each row is split in two halfs
     // each out_block is split into 64 threads doing 2 rows each.
     clStatus = clEnqueueNDRangeKernel(
@@ -256,9 +260,9 @@ void test_512x512_input()
     float* s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE * sizeof(float), 64);
     uint8_t* z = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE / 2, 64);
     int8_t* in = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, n * sizeof(float), 64);
-    float* in_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, sizeof(float), 64);
+    float* in_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, n / QBLOCK_SIZE * sizeof(float), 64);
     int8_t* out = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m, 64);
-    float* out_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, sizeof(float), 64);
+    float* out_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m / QBLOCK_SIZE * sizeof(float), 64);
 
     // 1 - Trivial
     {
@@ -630,7 +634,82 @@ void test_512x512_input()
     clSVMFree(context, out_scales);
 }
 
-int main()
+void test_dim_fuzz()
+{
+    cout << "### Dimension Fuzzing ###" << endl;
+
+    uint8_t* w = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 * 32768 / 2, 64);
+    float* s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 * 32768 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 * 32768 / QBLOCK_SIZE / 2, 64);
+    int8_t* in = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 * sizeof(float), 64);
+    float* in_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 / QBLOCK_SIZE * sizeof(float), 64);
+    int8_t* out = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768, 64);
+    float* out_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 / QBLOCK_SIZE * sizeof(float), 64);
+
+    for (int m = 512; m <= 32768; m += 512) {
+        for (int n = 512; n <= 32768; n += 512) {
+
+            SVMMAP(queue, w, m * n / 2);
+            BROADCAST(w, m * n / 2, 0x55);
+            SVMUNMAP(queue, w);
+
+            SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
+            BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
+            SVMUNMAP(queue, s);
+
+            SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
+            BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
+            SVMUNMAP(queue, z);
+
+            SVMMAP(queue, in, n);
+            BROADCAST(in, n, 2);
+            SVMUNMAP(queue, in);
+
+            SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
+            BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
+            SVMUNMAP(queue, in_scales);
+
+            SVMMAP(queue, out, m);
+            memset(out, 0, m);
+            SVMUNMAP(queue, out);
+
+            SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
+            float _os = (float)(n * 2 * 2 * 4) / 100.0f;
+            BROADCAST(out_scales, m / QBLOCK_SIZE, _os);
+            SVMUNMAP(queue, out_scales);
+
+            q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+            SVMMAP(queue, out, m);
+            bool passed = true;
+            for (int i = 0; i < m; i++) {
+                if (out[i] != 100) {
+                    cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
+                    passed = false;
+                }
+            }
+            SVMUNMAP(queue, out);
+
+            if (!passed) {
+                cout << "Fuzz Test 1 Failed for dim: " << m << ", " << n << endl;
+                cout << "Output scale: " << _os << endl;
+                cout << "Expected: " << 100 << endl;
+                exit(0);
+            }
+        }
+        cout << "Fuzz Test 1 Passed for dim: " << m << ", ?" << endl;
+    }
+
+    clSVMFree(context, w);
+    clSVMFree(context, s);
+    clSVMFree(context, z);
+    clSVMFree(context, in);
+    clSVMFree(context, in_scales);
+    clSVMFree(context, out);
+    clSVMFree(context, out_scales);
+}
+
+int main(int argc, char** argv)
 {
     cl_int clStatus;
     cl_device_id device[1];
@@ -690,6 +769,14 @@ int main()
     cout << endl
          << "Testing 512x512 input..." << endl;
     test_512x512_input();
+
+    if (argc == 2) {
+        if (string(argv[1]) == "fuzz") {
+            cout << "Fuzzing tests across all supported input dimensions ..." << endl;
+            cout << "This will take a long time" << endl;
+            test_dim_fuzz();
+        }
+    }
 
     // cleanup
     clReleaseKernel(vec_add_kernel);

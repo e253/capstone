@@ -134,14 +134,13 @@ void q4f32s_qi8f32s_egemv_offline(
     int m, int n)
 {
     assert(m >= 512 && n >= 512 && "m and n must be at least 128");
-    assert(m <= 32768 && n <= 32768 && "m and n can be at most 16384");
+    assert(m <= 32768 && n <= 32768 && "m and n can be at most 32768");
     assert(m % 512 == 0 && n % 512 == 0 && "m and n must be multiples of 128");
 
     size_t n_threads = 4;
     vector<thread> threads(n_threads);
 
     int rows_per_thread = m / n_threads;
-    assert(rows_per_thread % 128 == 0 && "Thread row blocks size must be divisible by 128");
     int start_row = 0;
     int end_row;
 
@@ -152,12 +151,12 @@ void q4f32s_qi8f32s_egemv_offline(
                                         int8_t* out, float* out_scales,
                                         int m, int n,
                                         int start_row, int end_row) {
-            int n_row_blocks = m / QBLOCK_SIZE;
+            int in_qblocks = n / QBLOCK_SIZE;
             for (int col = 0; col < n; col += 512) {
-                int col_block = col / QBLOCK_SIZE;
+                int in_qblock = col / QBLOCK_SIZE;
                 for (int row = start_row; row < end_row; row += 128) {
-                    int row_block = row / QBLOCK_SIZE;
-                    int block_id = row_block * n_row_blocks + col_block;
+                    int out_qblock = row / QBLOCK_SIZE;
+                    int block_id = out_qblock * in_qblocks + in_qblock;
 
                     q4f32s_qi8f32s_128x512_ukernel_offline(
                         w + (row * n / 2 + col / 2), n / 2,
@@ -310,14 +309,15 @@ void assert_arr_eq_i8(int8_t* arr, int8_t expected, int len, string passed_msg, 
     bool passed = true;
     for (int i = 0; i < len; i++) {
         if (arr[i] != expected) {
-            std::cout << "Output[" << i << "] = " << (int)arr[i] << std::endl;
+            cout << "Output[" << i << "] = " << (int)arr[i] << endl;
             passed = false;
         }
     }
     if (passed) {
-        std::cout << passed_msg << std::endl;
+        cout << passed_msg << endl;
     } else {
-        std::cout << failed_msg << std::endl;
+        cout << failed_msg << endl;
+        exit(0);
     }
 }
 
@@ -698,8 +698,70 @@ void test_offline_egemv()
     cout << endl;
 }
 
+void test_dim_fuzz()
+{
+    cout << "### Dimension Fuzzing ###" << endl;
+
+    uint8_t* w = (uint8_t*)_mm_malloc(32768 * 32768 / 2, 64);
+    float* s = (float*)_mm_malloc(32768 * 32768 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z = (uint8_t*)_mm_malloc(32768 * 32768 / QBLOCK_SIZE / 2, 64);
+    int8_t* in = (int8_t*)_mm_malloc(32768, 64);
+    float* in_scales = (float*)_mm_malloc(32768 / QBLOCK_SIZE * sizeof(float), 64);
+    int8_t* out = (int8_t*)_mm_malloc(32768, 64);
+    float* out_scales = (float*)_mm_malloc(32768 / QBLOCK_SIZE * sizeof(float), 64);
+
+    for (int m = 512; m <= 32768; m += 512) {
+        for (int n = 512; n <= 32768; n += 512) {
+
+            // 1 - Trivial
+            {
+                BROADCAST(w, 0x55, m * n / 2);
+                BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+                BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+                BROADCAST(in, 2, n);
+                BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
+                memset(out, 0, m);
+                float _os = (float)(n * 2 * 2 * 4) / 100.0f;
+                BROADCAST(out_scales, _os, m / QBLOCK_SIZE);
+
+                q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+                int expected = round((float)8192 / _os) * (n / 512);
+                if (expected > 127) {
+                    expected = 127;
+                }
+
+                bool passed = true;
+                for (int i = 0; i < m; i++) {
+                    if (out[i] != expected) {
+                        cout << "Output[" << i << "] = " << (int)out[i] << endl;
+                        passed = false;
+                    }
+                }
+                if (passed) {
+                    cout << "Fuzz Test 1 Passed for dim: " << m << ", " << n << endl;
+                } else {
+                    cout << "Fuzz Test 1 Failed for dim: " << m << ", " << n << endl;
+                    cout << "Output scale: " << _os << endl;
+                    cout << "Expected: " << expected << endl;
+                    exit(0);
+                }
+            }
+        }
+    }
+
+    _mm_free(w);
+    _mm_free(s);
+    _mm_free(z);
+    _mm_free(in);
+    _mm_free(in_scales);
+    _mm_free(out);
+    _mm_free(out_scales);
+}
+
 int main()
 {
     test_128x512_offline();
     test_offline_egemv();
+    test_dim_fuzz();
 }

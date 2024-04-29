@@ -509,6 +509,118 @@ void test_512x512_input()
         }
     }
 
+    // 6 - alternating weights along the output dimension
+    {
+        SVMMAP(queue, w, m * n / 2);
+        for (int row = 0; row < m; row++) { // row idx
+            for (int col = 0; col < n / 2; col++) { // col idx
+                w[row * n / 2 + col] = (row % 2 == 0) ? 0x33 : 0x55;
+            }
+        }
+        SVMUNMAP(queue, w);
+
+        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
+        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
+        SVMUNMAP(queue, s);
+
+        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
+        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
+        SVMUNMAP(queue, z);
+
+        SVMMAP(queue, in, n);
+        BROADCAST(in, n, 2);
+        SVMUNMAP(queue, in);
+
+        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
+        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
+        SVMUNMAP(queue, in_scales);
+
+        SVMMAP(queue, out, m);
+        memset(out, 0, m);
+        SVMUNMAP(queue, out);
+
+        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
+        BROADCAST(out_scales, m / QBLOCK_SIZE, 81.92f);
+        SVMUNMAP(queue, out_scales);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        SVMMAP(queue, out, m);
+        bool passed = true;
+        for (int i = 0; i < m; i++) {
+            if (out[i] != (i % 2 == 0 ? 50 : 100)) {
+                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
+                passed = false;
+            }
+        }
+        SVMUNMAP(queue, out);
+
+        if (passed) {
+            cout << "Test 6 Passed!" << endl;
+        } else {
+            cout << "Test 6 Failed!" << endl;
+        }
+    }
+
+    // 7 - alternating zeros along out dim
+    {
+        SVMMAP(queue, w, m * n / 2);
+        BROADCAST(w, m * n / 2, 0x11);
+        SVMUNMAP(queue, w);
+
+        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
+        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
+        SVMUNMAP(queue, s);
+
+        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
+        for (int out_qblock = 0; out_qblock < m / QBLOCK_SIZE; out_qblock++) {
+            for (int in_qblock = 0; in_qblock < n / QBLOCK_SIZE; in_qblock++) {
+                int qblock_id = out_qblock * n / QBLOCK_SIZE + in_qblock;
+                for (int el = 0; el < QBLOCK_SIZE; el++) {
+                    z[qblock_id * QBLOCK_SIZE / 2 + el] = (el % 2 == 0) ? 0x11 : 0x33;
+                }
+            }
+        }
+        SVMUNMAP(queue, z);
+
+        SVMMAP(queue, in, n);
+        BROADCAST(in, n, 2);
+        SVMUNMAP(queue, in);
+
+        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
+        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
+        SVMUNMAP(queue, in_scales);
+
+        SVMMAP(queue, out, m);
+        memset(out, 0, m);
+        SVMUNMAP(queue, out);
+
+        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
+        BROADCAST(out_scales, m / QBLOCK_SIZE, 40.96f);
+        SVMUNMAP(queue, out_scales);
+
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
+
+        SVMMAP(queue, out, m);
+        bool passed = true;
+        for (int i = 0; i < m; i += 4) {
+            if (out[i] != 0 || out[i + 1] != 0 || out[i + 2] != -100 || out[i + 3] != -100) {
+                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
+                cout << "Error: out[" << i + 1 << "] = " << (int)out[i + 1] << endl;
+                cout << "Error: out[" << i + 2 << "] = " << (int)out[i + 2] << endl;
+                cout << "Error: out[" << i + 3 << "] = " << (int)out[i + 3] << endl;
+                passed = false;
+            }
+        }
+        SVMUNMAP(queue, out);
+
+        if (passed) {
+            cout << "Test 7 Passed!" << endl;
+        } else {
+            cout << "Test 7 Failed!" << endl;
+        }
+    }
+
     clSVMFree(context, w);
     clSVMFree(context, s);
     clSVMFree(context, z);

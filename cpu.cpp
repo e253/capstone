@@ -6,62 +6,48 @@
 #include <thread>
 #include <vector>
 
-#define QBLOCK_SIZE 128
-
 using namespace std;
 
 // gets 64 u4 from memory and expands to u8
 inline __m512i load_weights(const uint8_t* w)
 {
-    /* Rough asm implementation
-    vmodqu8   (%rsi), %ymm0
-    vmovdu8   %ymm0, %ymm1
-    vpsrlw    $4, %ymm0, %ymm0
-    vinserti32x8 $1, %zmm0, %ymm1, %zmm0
-    vpand     %zmm0, %zmm2, %zmm0
-    # zmm2 is set of 0x0F
+    /*
+        Rough asm implementation
+        vmodqu8   (%rsi), %ymm0
+        vmovdu8   %ymm0, %ymm1
+        vpsrlw    $4, %ymm0, %ymm0
+        vinserti32x8 $1, %zmm0, %ymm1, %zmm0
+        vpand     %zmm0, %zmm2, %zmm0
+        # zmm2 is set of 0x0F
     */
     __m256i tmp = _mm256_loadu_si256((const __m256i*)w);
     __m512i weight = _mm512_inserti32x8(_mm512_castsi256_si512(tmp), _mm256_srli_epi32(tmp, 4), 1);
     return _mm512_and_si512(weight, _mm512_set1_epi8(0x0F));
 }
 
-#ifdef F32ACCUM
-typedef __m512 acc_t;
-#define REDUCE_ADD(acc) _mm512_reduce_add_ps((acc))
-#else
 typedef __m512i acc_t;
-#define REDUCE_ADD(acc) _mm512_reduce_add_epi32(acc)
-#endif
-
 #define CLAMP(x, lo, hi) (x < lo ? lo : (x > hi ? hi : round(x)))
+#define QBLOCK_SIZE 128
 
 inline acc_t mul_input_weight_accum(__m512i input, __m512i negative_input, __m512i weight, __m512i zero, acc_t acc)
 {
     /*
-    VNNI likes u8 * i8 multiplications
-    input(i8) * (weights (u8) - zeros (u8)) == weights(u8)*input(i8) - zeros(u8)*input(i8)
-    Signed muliplications are possible, but only with ymm regs ^_^
-    */
+        AVX512_VNNI likes u8 * i8 multiplications
+        input(i8) * (weights(u8) - zeros(u8)) == weights(u8)*input(i8) - zeros(u8)*input(i8)
+        Signed muliplications are possible, but only with 256-bit regs ^_^
 
-#ifdef F32ACCUM
-    __m512i tmp1 = _mm512_dpbusds_epi32(_mm512_setzero_epi32(), weight, input);
-    __m512i tmp2 = _mm512_dpbusds_epi32(_mm512_setzero_epi32(), zero, input);
-    tmp1 = _mm512_sub_epi32(tmp1, tmp2);
-    acc = _mm512_add_ps(acc, _mm512_cvtepi32_ps(tmp1));
-    return acc;
-#else
-    // overflow safety
-    // highest weight value is 15, highest abs input is 128. at most 1920
-    // highest zero value 15, highest abs input is 128. at most 1920
-    // most this change the accumulator is 11360 (4 values are added into each i32 in acc) * (3480 for each weight-zero pair)
-    // we can safely use i32 for accumulation for ~600k values
-    // Or if we want to reduce these 16 i32 values to one, we use ~35k values
+        - overflow safety
+        - highest weight value is 15, highest abs input is 128. at most 1920
+        - highest zero value 15, highest abs input is 128. at most 1920
+        - most this change the accumulator is 11360 (4 values are added into each i32 in acc) * (3480 for each weight-zero pair)
+        - we can safely use i32 for accumulation for ~600k values
+        - Or if we want to reduce these 16 i32 values to one, we use ~35k values
+        - This is within the dimension limits [512 - 32768]
+    */
 
     acc = _mm512_dpbusds_epi32(acc, weight, input);
     acc = _mm512_dpbusds_epi32(acc, zero, negative_input);
     return acc;
-#endif
 }
 
 /*
@@ -74,66 +60,66 @@ in_scale, scale value for input
 out, out, offset from the global pointer
 out_scale, scale value for output
 */
-void q4f32s_qi8f32s_128x128_ukernel_offline(
+void q4f32s_qi8f32s_128x512_ukernel_offline(
     uint8_t* __restrict w,
     uint64_t w_rs,
     float* __restrict scales,
     uint8_t* __restrict zeros,
     int8_t* __restrict in,
-    float in_scale,
+    float* __restrict in_scales,
     int8_t* __restrict out,
     float out_scale)
 {
-
-    float io_scale = in_scale / out_scale;
-
     for (int row = 0; row < 128; row += 4) {
-// Initialize accumulators
-#ifdef F32ACCUM
         __m512 acc1 = _mm512_setzero_ps();
         __m512 acc2 = _mm512_setzero_ps();
         __m512 acc3 = _mm512_setzero_ps();
         __m512 acc4 = _mm512_setzero_ps();
-#else
-        __m512i acc1 = _mm512_setzero_si512();
-        __m512i acc2 = _mm512_setzero_si512();
-        __m512i acc3 = _mm512_setzero_si512();
-        __m512i acc4 = _mm512_setzero_si512();
-#endif
 
-        // Choose Zeros
-        uint8_t _zero1 = zeros[row / 2];
-        uint8_t _zero2 = _zero1; // copy?
-        uint8_t _zero3 = zeros[row / 2 + 1];
-        uint8_t _zero4 = _zero3;
-        __m512i zero1 = _mm512_set1_epi8((_zero1 >> 4) & 0x0F);
-        __m512i zero2 = _mm512_set1_epi8(_zero2 & 0x0F);
-        __m512i zero3 = _mm512_set1_epi8((_zero3 >> 4) & 0x0F);
-        __m512i zero4 = _mm512_set1_epi8(_zero4 & 0x0F);
+        for (int qblock = 0; qblock < 4; qblock++) {
+            // Initialize accumulators
+            __m512i acc1i = _mm512_setzero_si512();
+            __m512i acc2i = _mm512_setzero_si512();
+            __m512i acc3i = _mm512_setzero_si512();
+            __m512i acc4i = _mm512_setzero_si512();
 
-        for (int col = 0; col < 128; col += 64) {
-            // load input 64 values
-            __m512i input = _mm512_loadu_epi8(in + col);
-            __m512i negative_input = _mm512_sub_epi8(_mm512_setzero_si512(), input);
+            // Choose Zeros
+            uint8_t _zero1 = zeros[(qblock * QBLOCK_SIZE + row) / 2];
+            uint8_t _zero2 = _zero1;
+            uint8_t _zero3 = zeros[(qblock * QBLOCK_SIZE + row) / 2 + 1];
+            uint8_t _zero4 = _zero3;
+            __m512i zero1 = _mm512_set1_epi8((_zero1 >> 4) & 0x0F);
+            __m512i zero2 = _mm512_set1_epi8(_zero2 & 0x0F);
+            __m512i zero3 = _mm512_set1_epi8((_zero3 >> 4) & 0x0F);
+            __m512i zero4 = _mm512_set1_epi8(_zero4 & 0x0F);
 
-            // load weights 64 values each
-            __m512i weight1 = load_weights(w + col / 2 + row * w_rs);
-            __m512i weight2 = load_weights(w + col / 2 + (row + 1) * w_rs);
-            __m512i weight3 = load_weights(w + col / 2 + (row + 2) * w_rs);
-            __m512i weight4 = load_weights(w + col / 2 + (row + 3) * w_rs);
+            for (int col = 0; col < 128; col += 64) {
+                // load input 64 values
+                __m512i input = _mm512_loadu_epi8(in + qblock * QBLOCK_SIZE + col);
+                __m512i negative_input = _mm512_sub_epi8(_mm512_setzero_si512(), input);
 
-            acc1 = mul_input_weight_accum(input, negative_input, weight1, zero1, acc1);
-            acc2 = mul_input_weight_accum(input, negative_input, weight2, zero2, acc2);
-            acc3 = mul_input_weight_accum(input, negative_input, weight3, zero3, acc3);
-            acc4 = mul_input_weight_accum(input, negative_input, weight4, zero4, acc4);
+                // load weights 64 values each
+                __m512i weight1 = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + row * w_rs);
+                __m512i weight2 = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + (row + 1) * w_rs);
+                __m512i weight3 = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + (row + 2) * w_rs);
+                __m512i weight4 = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + (row + 3) * w_rs);
+
+                acc1i = mul_input_weight_accum(input, negative_input, weight1, zero1, acc1i);
+                acc2i = mul_input_weight_accum(input, negative_input, weight2, zero2, acc2i);
+                acc3i = mul_input_weight_accum(input, negative_input, weight3, zero3, acc3i);
+                acc4i = mul_input_weight_accum(input, negative_input, weight4, zero4, acc4i);
+            }
+
+            acc1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acc1i), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row] * in_scales[qblock]), acc1);
+            acc2 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acc2i), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row + 1] * in_scales[qblock]), acc2);
+            acc3 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acc3i), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row + 2] * in_scales[qblock]), acc3);
+            acc4 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acc4i), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row + 3] * in_scales[qblock]), acc4);
         }
 
-        // This could be more efficient
-        // CLAMP makes sure the float is within the range of int8_t
-        out[row] = (int8_t)CLAMP((out[row] + REDUCE_ADD(acc1) * scales[row] * io_scale), -128.0f, 127.0f);
-        out[row + 1] = (int8_t)CLAMP((out[row + 1] + REDUCE_ADD(acc2) * scales[row + 1] * io_scale), -128.0f, 127.0f);
-        out[row + 2] = (int8_t)CLAMP((out[row + 2] + REDUCE_ADD(acc3) * scales[row + 2] * io_scale), -128.0f, 127.0f);
-        out[row + 3] = (int8_t)CLAMP((out[row + 3] + REDUCE_ADD(acc4) * scales[row + 3] * io_scale), -128.0f, 127.0f);
+        out[row] = (int8_t)CLAMP((out[row] + _mm512_reduce_add_ps(acc1) / out_scale), -128.0f, 127.0f);
+        out[row + 1] = (int8_t)CLAMP((out[row + 1] + _mm512_reduce_add_ps(acc2) / out_scale), -128.0f, 127.0f);
+        out[row + 2] = (int8_t)CLAMP((out[row + 2] + _mm512_reduce_add_ps(acc3) / out_scale), -128.0f, 127.0f);
+        out[row + 3] = (int8_t)CLAMP((out[row + 3] + _mm512_reduce_add_ps(acc4) / out_scale), -128.0f, 127.0f);
     }
 }
 
@@ -147,8 +133,9 @@ void q4f32s_qi8f32s_egemv_offline(
     float* out_scales,
     int m, int n)
 {
-    assert(m % 128 == 0 && "Row size must be divisble by 128");
-    assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
+    assert(m >= 512 && n >= 512 && "m and n must be at least 128");
+    assert(m <= 32768 && n <= 32768 && "m and n can be at most 16384");
+    assert(m % 512 == 0 && n % 512 == 0 && "m and n must be multiples of 128");
 
     size_t n_threads = 4;
     vector<thread> threads(n_threads);
@@ -166,17 +153,17 @@ void q4f32s_qi8f32s_egemv_offline(
                                         int m, int n,
                                         int start_row, int end_row) {
             int n_row_blocks = m / QBLOCK_SIZE;
-            for (int col = 0; col < n; col += 128) {
+            for (int col = 0; col < n; col += 512) {
                 int col_block = col / QBLOCK_SIZE;
                 for (int row = start_row; row < end_row; row += 128) {
                     int row_block = row / QBLOCK_SIZE;
                     int block_id = row_block * n_row_blocks + col_block;
 
-                    q4f32s_qi8f32s_128x128_ukernel_offline(
+                    q4f32s_qi8f32s_128x512_ukernel_offline(
                         w + (row * n / 2 + col / 2), n / 2,
                         s + block_id * QBLOCK_SIZE,
                         z + block_id * (QBLOCK_SIZE / 2),
-                        in + col, in_scales[col / QBLOCK_SIZE],
+                        in + col, in_scales + col / QBLOCK_SIZE,
                         out + row, out_scales[row / QBLOCK_SIZE]);
                 }
             }
@@ -334,12 +321,12 @@ void assert_arr_eq_i8(int8_t* arr, int8_t expected, int len, string passed_msg, 
     }
 }
 
-void test_128x128_offline()
+void test_128x512_offline()
 {
-    cout << "### q4f32s_qi8f32s_128x128_ukernel_offline() ###" << endl;
+    cout << "### q4f32s_qi8f32s_128x512_ukernel_offline() ###" << endl;
 
     int m = 128;
-    int n = 128;
+    int n = 512;
 
     uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
     float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
@@ -353,12 +340,12 @@ void test_128x128_offline()
         BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
         BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
         BROADCAST(in, 2, n);
-        float in_s = 1.0f;
-        std::memset(out, 0, m);
-        float out_s = 20.48f;
+        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        memset(out, 0, m);
+        float out_s = 81.96f;
 
-        q4f32s_qi8f32s_128x128_ukernel_offline(
-            w, m / 2,
+        q4f32s_qi8f32s_128x512_ukernel_offline(
+            w, n / 2,
             s, z,
             in, in_s,
             out, out_s);
@@ -373,12 +360,12 @@ void test_128x128_offline()
         BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
         BROADCAST(in, 2, n);
 
-        float in_s = 2.0f;
-        std::memset(out, 0, m);
-        float out_s = 20.48f;
+        float in_s[] = { 2.0f, 2.0f, 2.0f, 2.0f };
+        memset(out, 0, m);
+        float out_s = 81.92f;
 
-        q4f32s_qi8f32s_128x128_ukernel_offline(
-            w, m / 2,
+        q4f32s_qi8f32s_128x512_ukernel_offline(
+            w, n / 2,
             s, z,
             in, in_s,
             out, out_s);
@@ -411,12 +398,12 @@ void test_128x128_offline()
 
         BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
         BROADCAST(in, 2, n);
-        float in_s = 1.0f;
-        std::memset(out, 0, m);
-        float out_s = 7.68f;
+        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        memset(out, 0, m);
+        float out_s = 46.08f;
 
-        q4f32s_qi8f32s_128x128_ukernel_offline(
-            w, m / 2,
+        q4f32s_qi8f32s_128x512_ukernel_offline(
+            w, n / 2,
             s, z,
             in, in_s,
             out, out_s);
@@ -430,12 +417,12 @@ void test_128x128_offline()
         BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
         BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
         BROADCAST(in, 2, n);
-        float in_s = 1.0f;
+        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
         memset(out, 0, m);
-        float out_s = 20.48f;
+        float out_s = 81.96f;
 
-        q4f32s_qi8f32s_128x128_ukernel_offline(
-            w, m / 2,
+        q4f32s_qi8f32s_128x512_ukernel_offline(
+            w, n / 2,
             s, z,
             in, in_s,
             out, out_s);
@@ -449,12 +436,12 @@ void test_128x128_offline()
         BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
         BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
         BROADCAST(in, 2, n);
-        float in_s = 1.0f;
+        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
         memset(out, 0, m);
         float out_s = 1.0f;
 
-        q4f32s_qi8f32s_128x128_ukernel_offline(
-            w, m / 2,
+        q4f32s_qi8f32s_128x512_ukernel_offline(
+            w, n / 2,
             s, z,
             in, in_s,
             out, out_s);
@@ -472,12 +459,12 @@ void test_128x128_offline()
         BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
         BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
         BROADCAST(in, 2, n);
-        float in_s = 1.0f;
+        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
         memset(out, 0, m);
-        float out_s = 20.48f;
+        float out_s = 81.96f;
 
-        q4f32s_qi8f32s_128x128_ukernel_offline(
-            w, m / 2,
+        q4f32s_qi8f32s_128x512_ukernel_offline(
+            w, n / 2,
             s, z,
             in, in_s,
             out, out_s);
@@ -491,13 +478,13 @@ void test_128x128_offline()
         }
 
         if (passed) {
-            std::cout << "Offline 128x128 Test 6 Passed" << std::endl;
+            cout << "Offline 128x128 Test 6 Passed" << endl;
         } else {
-            std::cout << "Offline 128x128 Test 6 Failed" << std::endl;
+            cout << "Offline 128x128 Test 6 Failed" << endl;
         }
     }
 
-    // 7 - alternate zero values by input dimension
+    // 7 - alternate zero values
     {
         BROADCAST(w, 0x11, m * n / 2);
         BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
@@ -505,12 +492,12 @@ void test_128x128_offline()
             z[i] = (i % 2 == 0) ? 0x11 : 0x33;
         }
         BROADCAST(in, 2, n);
-        float in_s = 1.0f;
+        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
         memset(out, 0, m);
-        float out_s = 10.24f;
+        float out_s = 40.96f;
 
-        q4f32s_qi8f32s_128x128_ukernel_offline(
-            w, m / 2,
+        q4f32s_qi8f32s_128x512_ukernel_offline(
+            w, n / 2,
             s, z,
             in, in_s,
             out, out_s);
@@ -518,10 +505,10 @@ void test_128x128_offline()
         bool passed = true;
         for (int i = 0; i < m; i += 4) {
             if (out[i] != 0 || out[i + 1] != 0 || out[i + 2] != -100 || out[i + 3] != -100) {
-                std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
-                std::cout << "Output[" << i + 1 << "] = " << (int)out[i + 1] << std::endl;
-                std::cout << "Output[" << i + 2 << "] = " << (int)out[i + 2] << std::endl;
-                std::cout << "Output[" << i + 3 << "] = " << (int)out[i + 3] << std::endl;
+                cout << "Output[" << i << "] = " << (int)out[i] << endl;
+                cout << "Output[" << i + 1 << "] = " << (int)out[i + 1] << endl;
+                cout << "Output[" << i + 2 << "] = " << (int)out[i + 2] << endl;
+                cout << "Output[" << i + 3 << "] = " << (int)out[i + 3] << endl;
                 passed = false;
             }
         }
@@ -590,7 +577,7 @@ void test_offline_egemv()
 
         q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
 
-        assert_arr_eq_i8(out, 100, m, "Offline Egemv Test 2 Passed", "Offline Egemv Test 2 Failed");
+        assert_arr_eq_i8(out, 100, m, "Offline EGEMV Test 2 Passed", "Offline Egemv Test 2 Failed");
     }
 
     // 3 - trivial, but non 1.0 input scale
@@ -713,6 +700,6 @@ void test_offline_egemv()
 
 int main()
 {
-    test_128x128_offline();
+    test_128x512_offline();
     test_offline_egemv();
 }

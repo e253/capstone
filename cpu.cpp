@@ -643,7 +643,7 @@ void test_offline_egemv()
 
         bool passed = true;
         for (int i = 0; i < m; i++) {
-            if (out[i] != (i % 2 == 0 ? 52 : 100)) { // this is not 50, becuase of rounding.
+            if (out[i] != (i % 2 == 0 ? 50 : 100)) { // this is not 50, becuase of rounding.
                 std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
                 passed = false;
             }

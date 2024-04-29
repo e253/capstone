@@ -43,10 +43,13 @@ void bench_llama_ffn()
 
     ggml_tensor* x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4096, 1);
     random_init_array((char*)x->data, ggml_nbytes(x));
+
     ggml_tensor* up_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_1, 4096, 14336);
     random_init_array((char*)up_proj->data, ggml_nbytes(up_proj));
+
     ggml_tensor* gate_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_1, 4096, 14336);
     random_init_array((char*)gate_proj->data, ggml_nbytes(gate_proj));
+
     ggml_tensor* down_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_1, 14336, 4096);
     random_init_array((char*)gate_proj->data, ggml_nbytes(down_proj));
 
@@ -77,5 +80,7 @@ void bench_llama_ffn()
 
 int main()
 {
+    cout << "NUMA?: " << ggml_is_numa() << endl;
+
     bench_llama_ffn();
 }

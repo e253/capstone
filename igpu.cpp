@@ -1,5 +1,6 @@
 #include <CL/cl.h>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -709,6 +710,154 @@ void test_dim_fuzz()
     clSVMFree(context, out_scales);
 }
 
+void random_init_array(char* arr, int len)
+{
+    for (int i = 0; i < len; i++) {
+        arr[i] = rand() % 256;
+    }
+}
+
+void bench_llama_ffn()
+{
+    // down proj 4096x14336
+    // gate_proj 14336x4096
+    // up_proj 14336x4096
+    // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
+    // we do not do the elementwise multiply
+    // we do not apply SwiGLU non-linearity in the hidden_dim
+    // just the matmuls. skips 14k ops out of 176M total (4096 * 14336 * 3)
+    cout << "Benchmarking LLAMA FFN ..." << endl;
+    cout << "down_proj @ (up_proj @ x * gate_proj @ x)" << endl;
+    cout << "Hidden Dim: 14436, Dim: 4096" << endl;
+    cout << endl;
+
+    // ==== activations ====
+    int8_t* io = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096, 64);
+    float* input_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 / QBLOCK_SIZE * sizeof(float), 64);
+    float* output_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 / QBLOCK_SIZE * sizeof(float), 64);
+    SVMMAP(queue, io, 4096);
+    SVMMAP(queue, input_scales, 4096 / QBLOCK_SIZE * sizeof(float));
+    SVMMAP(queue, output_scales, 4096 / QBLOCK_SIZE * sizeof(float));
+    random_init_array((char*)io, 4096);
+    random_init_array((char*)input_scales, 4096 / QBLOCK_SIZE);
+    random_init_array((char*)output_scales, 4096 / QBLOCK_SIZE);
+    SVMUNMAP(queue, io);
+    SVMUNMAP(queue, input_scales);
+    SVMUNMAP(queue, output_scales);
+
+    // ==== up_proj ====
+    uint8_t* w_up_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / 2, 64);
+    float* s_up_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_up_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / QBLOCK_SIZE / 2, 64);
+    int8_t* out_up_proj = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336, 64);
+    float* out_scales_up_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 / QBLOCK_SIZE * sizeof(float), 64);
+    SVMMAP(queue, w_up_proj, 14336 * 4096 / 2);
+    SVMMAP(queue, s_up_proj, 14336 * 4096 / QBLOCK_SIZE * sizeof(float));
+    SVMMAP(queue, z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
+    SVMMAP(queue, out_up_proj, 14336);
+    SVMMAP(queue, out_scales_up_proj, 14336 / QBLOCK_SIZE * sizeof(float));
+    random_init_array((char*)w_up_proj, 14336 * 4096 / 2);
+    random_init_array((char*)s_up_proj, 14336 * 4096 / QBLOCK_SIZE);
+    random_init_array((char*)z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
+    random_init_array((char*)out_up_proj, 14336);
+    random_init_array((char*)out_scales_up_proj, 14336 / QBLOCK_SIZE);
+    SVMUNMAP(queue, w_up_proj);
+    SVMUNMAP(queue, s_up_proj);
+    SVMUNMAP(queue, z_up_proj);
+    SVMUNMAP(queue, out_up_proj);
+    SVMUNMAP(queue, out_scales_up_proj);
+
+    // ==== gate_proj ====
+    uint8_t* w_gate_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / 2, 64);
+    float* s_gate_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_gate_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE / 2, 64);
+    int8_t* out_gate_proj = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336, 64);
+    float* out_scales_gate_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 / QBLOCK_SIZE * sizeof(float), 64);
+    SVMMAP(queue, w_gate_proj, 4096 * 14336 / 2);
+    SVMMAP(queue, s_gate_proj, 4096 * 14336 / QBLOCK_SIZE * sizeof(float));
+    SVMMAP(queue, z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+    SVMMAP(queue, out_gate_proj, 14336);
+    SVMMAP(queue, out_scales_gate_proj, 14336 / QBLOCK_SIZE * sizeof(float));
+    random_init_array((char*)w_gate_proj, 4096 * 14336 / 2);
+    random_init_array((char*)s_gate_proj, 4096 * 14336 / QBLOCK_SIZE);
+    random_init_array((char*)z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+    random_init_array((char*)out_gate_proj, 14336);
+    random_init_array((char*)out_scales_gate_proj, 14336 / QBLOCK_SIZE);
+    SVMUNMAP(queue, w_gate_proj);
+    SVMUNMAP(queue, s_gate_proj);
+    SVMUNMAP(queue, z_gate_proj);
+    SVMUNMAP(queue, out_gate_proj);
+    SVMUNMAP(queue, out_scales_gate_proj);
+
+    // ==== down_proj ====
+    uint8_t* w_down_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / 2, 64);
+    float* s_down_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_down_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE / 2, 64);
+    SVMMAP(queue, w_down_proj, 4096 * 14336 / 2);
+    SVMMAP(queue, s_down_proj, 4096 * 14336 / QBLOCK_SIZE * sizeof(float));
+    SVMMAP(queue, z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+    random_init_array((char*)w_down_proj, 4096 * 14336 / 2);
+    random_init_array((char*)s_down_proj, 4096 * 14336 / QBLOCK_SIZE);
+    random_init_array((char*)z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+    SVMUNMAP(queue, w_down_proj);
+    SVMUNMAP(queue, s_down_proj);
+    SVMUNMAP(queue, z_down_proj);
+
+    // ==== bench ====
+    const int NIT = 200;
+    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < NIT; i++) {
+        // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
+        // up_proj @ x
+        q4f32s_qi8f32s_egemv_offline(
+            w_up_proj, s_up_proj, z_up_proj,
+            io, input_scales,
+            out_up_proj, out_scales_up_proj,
+            14336, 4096);
+
+        // gate_proj @ x
+        q4f32s_qi8f32s_egemv_offline(
+            w_gate_proj, s_gate_proj, z_gate_proj,
+            io, input_scales,
+            out_gate_proj, out_scales_gate_proj,
+            14336, 4096);
+
+        // down_proj @ up_proj_out
+        q4f32s_qi8f32s_egemv_offline(
+            w_down_proj, s_down_proj, z_down_proj,
+            out_up_proj, out_scales_up_proj,
+            io, output_scales,
+            4096, 14336);
+    }
+    auto end = chrono::high_resolution_clock::now();
+
+    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+    cout << "total: " << sec << " (s)" << endl;
+    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
+
+    uint64_t flops_processed = 4096 * 14336 * 6 * (uint64_t)NIT;
+    double flops_per_sec = flops_processed / sec;
+    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
+    cout << endl;
+
+    // ==== cleanup ====
+    clSVMFree(context, io);
+    clSVMFree(context, input_scales);
+    clSVMFree(context, w_up_proj);
+    clSVMFree(context, s_up_proj);
+    clSVMFree(context, z_up_proj);
+    clSVMFree(context, out_up_proj);
+    clSVMFree(context, out_scales_up_proj);
+    clSVMFree(context, w_gate_proj);
+    clSVMFree(context, s_gate_proj);
+    clSVMFree(context, z_gate_proj);
+    clSVMFree(context, out_gate_proj);
+    clSVMFree(context, out_scales_gate_proj);
+    clSVMFree(context, w_down_proj);
+    clSVMFree(context, s_down_proj);
+    clSVMFree(context, z_down_proj);
+}
+
 int main(int argc, char** argv)
 {
     cl_int clStatus;
@@ -776,7 +925,12 @@ int main(int argc, char** argv)
             cout << "This will take a long time" << endl;
             test_dim_fuzz();
         }
+    } else {
+        cout << "Skipping Fuzz. run `./cpu.exe fuzz` to fuzz" << endl;
     }
+    cout << endl;
+
+    bench_llama_ffn();
 
     // cleanup
     clReleaseKernel(vec_add_kernel);

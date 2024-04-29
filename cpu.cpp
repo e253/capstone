@@ -1,4 +1,5 @@
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <immintrin.h>
@@ -758,6 +759,122 @@ void test_dim_fuzz()
     _mm_free(out_scales);
 }
 
+void random_init_array(char* arr, int len)
+{
+    for (int i = 0; i < len; i++) {
+        arr[i] = rand() % 256;
+    }
+}
+
+void bench_llama_ffn()
+{
+    // down proj 4096x14336
+    // gate_proj 14336x4096
+    // up_proj 14336x4096
+    // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
+    // we do not do the elementwise multiply
+    // we do not apply SwiGLU non-linearity in the hidden_dim
+    // just the matmuls. skips 14k ops out of 176M total (4096 * 14336 * 3)
+    cout << "Benchmarking LLAMA FFN ..." << endl;
+    cout << "down_proj @ (up_proj @ x * gate_proj @ x)" << endl;
+    cout << "Hidden Dim: 14436, Dim: 4096" << endl;
+    cout << endl;
+
+    // ==== activations ====
+    int8_t* io = (int8_t*)_mm_malloc(4096, 64);
+    float* input_scales = (float*)_mm_malloc(4096 / QBLOCK_SIZE * sizeof(float), 64);
+    float* output_scales = (float*)_mm_malloc(4096 / QBLOCK_SIZE * sizeof(float), 64);
+    random_init_array((char*)io, 4096);
+    random_init_array((char*)input_scales, 4096 / QBLOCK_SIZE);
+    random_init_array((char*)output_scales, 4096 / QBLOCK_SIZE);
+
+    // ==== up_proj ====
+    uint8_t* w_up_proj = (uint8_t*)_mm_malloc(14336 * 4096 / 2, 64);
+    float* s_up_proj = (float*)_mm_malloc(14336 * 4096 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_up_proj = (uint8_t*)_mm_malloc(14336 * 4096 / QBLOCK_SIZE / 2, 64);
+    int8_t* out_up_proj = (int8_t*)_mm_malloc(14336, 64);
+    float* out_scales_up_proj = (float*)_mm_malloc(14336 / QBLOCK_SIZE * sizeof(float), 64);
+    random_init_array((char*)w_up_proj, 14336 * 4096 / 2);
+    random_init_array((char*)s_up_proj, 14336 * 4096 / QBLOCK_SIZE);
+    random_init_array((char*)z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
+    random_init_array((char*)out_up_proj, 14336);
+    random_init_array((char*)out_scales_up_proj, 14336 / QBLOCK_SIZE);
+
+    // ==== gate_proj ====
+    uint8_t* w_gate_proj = (uint8_t*)_mm_malloc(4096 * 14336 / 2, 64);
+    float* s_gate_proj = (float*)_mm_malloc(4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_gate_proj = (uint8_t*)_mm_malloc(4096 * 14336 / QBLOCK_SIZE / 2, 64);
+    int8_t* out_gate_proj = (int8_t*)_mm_malloc(14336, 64);
+    float* out_scales_gate_proj = (float*)_mm_malloc(14336 / QBLOCK_SIZE * sizeof(float), 64);
+    random_init_array((char*)w_gate_proj, 4096 * 14336 / 2);
+    random_init_array((char*)s_gate_proj, 4096 * 14336 / QBLOCK_SIZE);
+    random_init_array((char*)z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+    random_init_array((char*)out_gate_proj, 14336);
+    random_init_array((char*)out_scales_gate_proj, 14336 / QBLOCK_SIZE);
+
+    // ==== down_proj ====
+    uint8_t* w_down_proj = (uint8_t*)_mm_malloc(4096 * 14336 / 2, 64);
+    float* s_down_proj = (float*)_mm_malloc(4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_down_proj = (uint8_t*)_mm_malloc(4096 * 14336 / QBLOCK_SIZE / 2, 64);
+    random_init_array((char*)w_down_proj, 4096 * 14336 / 2);
+    random_init_array((char*)s_down_proj, 4096 * 14336 / QBLOCK_SIZE);
+    random_init_array((char*)z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+
+    // ==== bench ====
+    const int NIT = 200;
+    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < NIT; i++) {
+        // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
+        // up_proj @ x
+        q4f32s_qi8f32s_egemv_offline(
+            w_up_proj, s_up_proj, z_up_proj,
+            io, input_scales,
+            out_up_proj, out_scales_up_proj,
+            14336, 4096);
+
+        // gate_proj @ x
+        q4f32s_qi8f32s_egemv_offline(
+            w_gate_proj, s_gate_proj, z_gate_proj,
+            io, input_scales,
+            out_gate_proj, out_scales_gate_proj,
+            14336, 4096);
+
+        // down_proj @ up_proj_out
+        q4f32s_qi8f32s_egemv_offline(
+            w_down_proj, s_down_proj, z_down_proj,
+            out_up_proj, out_scales_up_proj,
+            io, output_scales,
+            4096, 14336);
+    }
+    auto end = chrono::high_resolution_clock::now();
+
+    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+    cout << "total: " << sec << " (s)" << endl;
+    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
+
+    uint64_t flops_processed = 4096 * 14336 * 6 * (uint64_t)NIT;
+    double flops_per_sec = flops_processed / sec;
+    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
+    cout << endl;
+
+    // ==== cleanup ====
+    _mm_free(io);
+    _mm_free(input_scales);
+    _mm_free(w_up_proj);
+    _mm_free(s_up_proj);
+    _mm_free(z_up_proj);
+    _mm_free(out_up_proj);
+    _mm_free(out_scales_up_proj);
+    _mm_free(w_gate_proj);
+    _mm_free(s_gate_proj);
+    _mm_free(z_gate_proj);
+    _mm_free(out_gate_proj);
+    _mm_free(out_scales_gate_proj);
+    _mm_free(w_down_proj);
+    _mm_free(s_down_proj);
+    _mm_free(z_down_proj);
+}
+
 int main(int argc, char** argv)
 {
     test_128x512_offline();
@@ -769,5 +886,10 @@ int main(int argc, char** argv)
             cout << "This will take a long time" << endl;
             test_dim_fuzz();
         }
+    } else {
+        cout << "Skipping Fuzz. run `./cpu.exe fuzz` to fuzz" << endl;
     }
+    cout << endl;
+
+    bench_llama_ffn();
 }

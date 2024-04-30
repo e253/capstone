@@ -717,6 +717,64 @@ void random_init_array(char* arr, int len)
     }
 }
 
+void bench_llama_up_proj()
+{
+    cout << "Benchmarking LLAMA Up Proj ..." << endl;
+    cout << "Hidden Dim: 14336, Dim: 4096" << endl;
+    cout << endl;
+
+    int m = 14336;
+    int n = 4096;
+
+    uint8_t* w = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / 2, 64);
+    float* s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE / 2, 64);
+    int8_t* in = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, n, 64);
+    float* input_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, n / QBLOCK_SIZE * sizeof(float), 64);
+    int8_t* out = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m, 64);
+    float* output_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m / QBLOCK_SIZE * sizeof(float), 64);
+    SVMMAP(queue, w, m * n / 2);
+    SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
+    SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
+    SVMMAP(queue, in, n);
+    SVMMAP(queue, input_scales, n / QBLOCK_SIZE * sizeof(float));
+    random_init_array((char*)w, m * n / 2);
+    random_init_array((char*)s, m * n / QBLOCK_SIZE * sizeof(float));
+    random_init_array((char*)z, m * n / QBLOCK_SIZE / 2);
+    random_init_array((char*)in, n);
+    random_init_array((char*)input_scales, n / QBLOCK_SIZE * sizeof(float));
+    SVMUNMAP(queue, w);
+    SVMUNMAP(queue, s);
+    SVMUNMAP(queue, z);
+    SVMUNMAP(queue, in);
+    SVMUNMAP(queue, input_scales);
+
+    // ==== bench ====
+    const int NIT = 200;
+    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < NIT; i++) {
+        q4f32s_qi8f32s_egemv_offline(w, s, z, in, input_scales, out, output_scales, m, n);
+    }
+    auto end = chrono::high_resolution_clock::now();
+
+    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+    cout << "total: " << sec << " (s)" << endl;
+    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
+
+    uint64_t flops_processed = 4096 * 14336 * 2 * (uint64_t)NIT;
+    double flops_per_sec = flops_processed / sec;
+    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
+    cout << endl;
+
+    clSVMFree(context, w);
+    clSVMFree(context, s);
+    clSVMFree(context, z);
+    clSVMFree(context, in);
+    clSVMFree(context, input_scales);
+    clSVMFree(context, out);
+    clSVMFree(context, output_scales);
+}
+
 void bench_llama_ffn()
 {
     // down proj 4096x14336
@@ -930,6 +988,7 @@ int main(int argc, char** argv)
     }
     cout << endl;
 
+    bench_llama_up_proj();
     bench_llama_ffn();
 
     // cleanup

@@ -51,6 +51,17 @@ inline acc_t mul_input_weight_accum(__m512i input, __m512i negative_input, __m51
     return acc;
 }
 
+// https://github.com/ggerganov/ggml/blob/cf1acc512432a969cee18947330fd26df67fb456/src/ggml-quants.c#L84
+inline float hsum_float_16(__m512 x)
+{
+    __m256 tmp256 = _mm256_add_ps(_mm512_castps512_ps256(x), _mm512_extractf32x8_ps(x, 1));
+    __m128 res = _mm256_extractf128_ps(tmp256, 1);
+    res = _mm_add_ps(res, _mm256_castps256_ps128(tmp256));
+    res = _mm_add_ps(res, _mm_movehl_ps(res, res));
+    res = _mm_add_ss(res, _mm_movehdup_ps(res));
+    return _mm_cvtss_f32(res);
+}
+
 /*
 w, Weight, offset from the global pointer
 w_rs, Row stride for weights
@@ -71,28 +82,18 @@ void q4f32s_qi8f32s_128x512_ukernel_offline(
     int8_t* __restrict out,
     float out_scale)
 {
-    for (int row = 0; row < 128; row += 4) {
-        __m512 acc1 = _mm512_setzero_ps();
-        __m512 acc2 = _mm512_setzero_ps();
-        __m512 acc3 = _mm512_setzero_ps();
-        __m512 acc4 = _mm512_setzero_ps();
+    for (int row = 0; row < 128; row++) {
+        __m512 acc = _mm512_setzero_ps();
 
         for (int qblock = 0; qblock < 4; qblock++) {
             // Initialize accumulators
-            __m512i acc1i = _mm512_setzero_si512();
-            __m512i acc2i = _mm512_setzero_si512();
-            __m512i acc3i = _mm512_setzero_si512();
-            __m512i acc4i = _mm512_setzero_si512();
+            __m512i acci = _mm512_setzero_si512();
 
-            // Choose Zeros
-            uint8_t _zero1 = zeros[(qblock * QBLOCK_SIZE + row) / 2];
-            uint8_t _zero2 = _zero1;
-            uint8_t _zero3 = zeros[(qblock * QBLOCK_SIZE + row) / 2 + 1];
-            uint8_t _zero4 = _zero3;
-            __m512i zero1 = _mm512_set1_epi8((_zero1 >> 4) & 0x0F);
-            __m512i zero2 = _mm512_set1_epi8(_zero2 & 0x0F);
-            __m512i zero3 = _mm512_set1_epi8((_zero3 >> 4) & 0x0F);
-            __m512i zero4 = _mm512_set1_epi8(_zero4 & 0x0F);
+            // Load Zero
+            uint8_t _zero = zeros[(qblock * QBLOCK_SIZE + row) / 2];
+            _zero >>= (!(row & 1) << 2); // 4 if row is even, 0
+            _zero &= 0x0F;
+            __m512i zero = _mm512_set1_epi8(_zero);
 
             for (int col = 0; col < 128; col += 64) {
                 // load input 64 values
@@ -100,27 +101,16 @@ void q4f32s_qi8f32s_128x512_ukernel_offline(
                 __m512i negative_input = _mm512_sub_epi8(_mm512_setzero_si512(), input);
 
                 // load weights 64 values each
-                __m512i weight1 = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + row * w_rs);
-                __m512i weight2 = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + (row + 1) * w_rs);
-                __m512i weight3 = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + (row + 2) * w_rs);
-                __m512i weight4 = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + (row + 3) * w_rs);
+                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + row * w_rs);
 
-                acc1i = mul_input_weight_accum(input, negative_input, weight1, zero1, acc1i);
-                acc2i = mul_input_weight_accum(input, negative_input, weight2, zero2, acc2i);
-                acc3i = mul_input_weight_accum(input, negative_input, weight3, zero3, acc3i);
-                acc4i = mul_input_weight_accum(input, negative_input, weight4, zero4, acc4i);
+                acci = _mm512_dpbusds_epi32(acci, weight, input);
+                acci = _mm512_dpbusds_epi32(acci, zero, negative_input);
             }
 
-            acc1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acc1i), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row] * in_scales[qblock]), acc1);
-            acc2 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acc2i), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row + 1] * in_scales[qblock]), acc2);
-            acc3 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acc3i), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row + 2] * in_scales[qblock]), acc3);
-            acc4 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acc4i), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row + 3] * in_scales[qblock]), acc4);
+            acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acci), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row] * in_scales[qblock]), acc);
         }
 
-        out[row] = (int8_t)CLAMP((out[row] + _mm512_reduce_add_ps(acc1) / out_scale), -128.0f, 127.0f);
-        out[row + 1] = (int8_t)CLAMP((out[row + 1] + _mm512_reduce_add_ps(acc2) / out_scale), -128.0f, 127.0f);
-        out[row + 2] = (int8_t)CLAMP((out[row + 2] + _mm512_reduce_add_ps(acc3) / out_scale), -128.0f, 127.0f);
-        out[row + 3] = (int8_t)CLAMP((out[row + 3] + _mm512_reduce_add_ps(acc4) / out_scale), -128.0f, 127.0f);
+        out[row] = (int8_t)CLAMP((out[row] + hsum_float_16(acc) / out_scale), -128.0f, 127.0f);
     }
 }
 
@@ -138,10 +128,10 @@ void q4f32s_qi8f32s_egemv_offline(
     assert(m <= 32768 && n <= 32768 && "m and n can be at most 32768");
     assert(m % 512 == 0 && n % 512 == 0 && "m and n must be multiples of 128");
 
-    size_t n_threads = 4;
+    size_t n_threads = 3;
     vector<thread> threads(n_threads);
 
-    int rows_per_thread = m / n_threads;
+    int rows_per_thread = m / (n_threads + 1);
     int start_row = 0;
     int end_row;
 
@@ -172,6 +162,24 @@ void q4f32s_qi8f32s_egemv_offline(
 
         start_row += rows_per_thread;
     }
+    // this thread is a worker too!
+    end_row += rows_per_thread;
+    int in_qblocks = n / QBLOCK_SIZE;
+    for (int col = 0; col < n; col += 512) {
+        int in_qblock = col / QBLOCK_SIZE;
+        for (int row = start_row; row < end_row; row += 128) {
+            int out_qblock = row / QBLOCK_SIZE;
+            int block_id = out_qblock * in_qblocks + in_qblock;
+
+            q4f32s_qi8f32s_128x512_ukernel_offline(
+                w + (row * n / 2 + col / 2), n / 2,
+                s + block_id * QBLOCK_SIZE,
+                z + block_id * (QBLOCK_SIZE / 2),
+                in + col, in_scales + col / QBLOCK_SIZE,
+                out + row, out_scales[row / QBLOCK_SIZE]);
+        }
+    }
+
     for (auto& t : threads) {
         t.join();
     }
@@ -766,6 +774,57 @@ void random_init_array(char* arr, int len)
     }
 }
 
+void bench_llama_up_proj()
+{
+    cout << "Benchmarking LLAMA Up Proj ..." << endl;
+    cout << "Hidden Dim: 14336, Dim: 4096" << endl;
+    cout << endl;
+
+    int m = 14336;
+    int n = 4096;
+
+    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
+    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
+    int8_t* in = (int8_t*)_mm_malloc(n, 64);
+    float* input_scales = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
+    int8_t* out = (int8_t*)_mm_malloc(m, 64);
+    float* output_scales = (float*)_mm_malloc(m / QBLOCK_SIZE * sizeof(float), 64);
+    random_init_array((char*)w, m * n / 2);
+    random_init_array((char*)s, m * n / QBLOCK_SIZE * sizeof(float));
+    random_init_array((char*)z, m * n / QBLOCK_SIZE / 2);
+    random_init_array((char*)in, n);
+    random_init_array((char*)input_scales, n / QBLOCK_SIZE * sizeof(float));
+
+    const int NIT = 200;
+    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < NIT; i++) {
+        q4f32s_qi8f32s_egemv_offline(
+            w, s, z,
+            in, input_scales,
+            out, output_scales,
+            m, n);
+    }
+    auto end = chrono::high_resolution_clock::now();
+
+    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+    cout << "total: " << sec << " (s)" << endl;
+    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
+
+    uint64_t flops_processed = 4096 * 14336 * 2 * (uint64_t)NIT;
+    double flops_per_sec = flops_processed / sec;
+    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
+    cout << endl;
+
+    _mm_free(w);
+    _mm_free(s);
+    _mm_free(z);
+    _mm_free(in);
+    _mm_free(input_scales);
+    _mm_free(out);
+    _mm_free(output_scales);
+}
+
 void bench_llama_ffn()
 {
     // down proj 4096x14336
@@ -891,5 +950,6 @@ int main(int argc, char** argv)
     }
     cout << endl;
 
+    bench_llama_up_proj();
     bench_llama_ffn();
 }

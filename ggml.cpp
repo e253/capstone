@@ -116,6 +116,7 @@ void bench_llama_up_proj()
         struct ggml_cgraph* gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, out);
         ggml_graph_compute_with_ctx(ctx, gf, /* n_threads = */ 4);
+        // outputs in f32, offline quant
     }
     auto end = chrono::high_resolution_clock::now();
 

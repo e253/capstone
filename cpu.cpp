@@ -30,33 +30,31 @@ typedef __m512i acc_t;
 #define CLAMP(x, lo, hi) (x < lo ? lo : (x > hi ? hi : round(x)))
 #define QBLOCK_SIZE 128
 
-inline acc_t mul_input_weight_accum(__m512i input, __m512i negative_input, __m512i weight, __m512i zero, acc_t acc)
-{
-    /*
-        AVX512_VNNI likes u8 * i8 multiplications
-        input(i8) * (weights(u8) - zeros(u8)) == weights(u8)*input(i8) - zeros(u8)*input(i8)
-        Signed muliplications are possible, but only with 256-bit regs ^_^
-
-        - overflow safety
-        - highest weight value is 15, highest abs input is 128. at most 1920
-        - highest zero value 15, highest abs input is 128. at most 1920
-        - most this change the accumulator is 11360 (4 values are added into each i32 in acc) * (3480 for each weight-zero pair)
-        - we can safely use i32 for accumulation for ~600k values
-        - Or if we want to reduce these 16 i32 values to one, we use ~35k values
-        - This is within the dimension limits [512 - 32768]
-    */
-
-    acc = _mm512_dpbusds_epi32(acc, weight, input);
-    acc = _mm512_dpbusds_epi32(acc, zero, negative_input);
-    return acc;
-}
-
 // https://github.com/ggerganov/ggml/blob/cf1acc512432a969cee18947330fd26df67fb456/src/ggml-quants.c#L84
 inline float hsum_float_16(__m512 x)
 {
     __m256 tmp256 = _mm256_add_ps(_mm512_castps512_ps256(x), _mm512_extractf32x8_ps(x, 1));
     __m128 res = _mm256_extractf128_ps(tmp256, 1);
     res = _mm_add_ps(res, _mm256_castps256_ps128(tmp256));
+    res = _mm_add_ps(res, _mm_movehl_ps(res, res));
+    res = _mm_add_ss(res, _mm_movehdup_ps(res));
+    return _mm_cvtss_f32(res);
+}
+
+inline int hsum_i32_16(__m512i x)
+{
+    __m256i a = _mm256_add_epi32(_mm512_castsi512_si256(x), _mm512_extracti32x8_epi32(x, 1));
+    const __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(a), _mm256_extractf128_si256(a, 1));
+    const __m128i hi64 = _mm_unpackhi_epi64(sum128, sum128);
+    const __m128i sum64 = _mm_add_epi32(hi64, sum128);
+    const __m128i hi32 = _mm_shuffle_epi32(sum64, _MM_SHUFFLE(2, 3, 0, 1));
+    return _mm_cvtsi128_si32(_mm_add_epi32(sum64, hi32));
+}
+
+inline float hsum_float_8(__m256 x)
+{
+    __m128 res = _mm256_extractf128_ps(x, 1);
+    res = _mm_add_ps(res, _mm256_castps256_ps128(x));
     res = _mm_add_ps(res, _mm_movehl_ps(res, res));
     res = _mm_add_ss(res, _mm_movehdup_ps(res));
     return _mm_cvtss_f32(res);
@@ -83,7 +81,8 @@ void q4f32s_qi8f32s_128x512_ukernel_offline(
     float out_scale)
 {
     for (int row = 0; row < 128; row++) {
-        __m512 acc = _mm512_setzero_ps();
+        //__m256 acc = _mm256_setzero_ps();
+        float acc = 0;
 
         for (int qblock = 0; qblock < 4; qblock++) {
             // Initialize accumulators
@@ -95,22 +94,37 @@ void q4f32s_qi8f32s_128x512_ukernel_offline(
             _zero &= 0x0F;
             __m512i zero = _mm512_set1_epi8(_zero);
 
-            for (int col = 0; col < 128; col += 64) {
+            {
                 // load input 64 values
-                __m512i input = _mm512_loadu_epi8(in + qblock * QBLOCK_SIZE + col);
+                __m512i input = _mm512_loadu_epi8(in + qblock * QBLOCK_SIZE);
                 __m512i negative_input = _mm512_sub_epi8(_mm512_setzero_si512(), input);
 
                 // load weights 64 values each
-                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE + col) / 2 + row * w_rs);
+                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE) / 2 + row * w_rs);
 
+                // AVX512_VNNI likes u8 * i8 multiplications
+                // input(i8) * (weights(u8) - zeros(u8)) == weights(u8)*input(i8) + zeros(u8)*(-input(i8))
+                // Signed muliplications are possible, but only with 256-bit regs ^_^
+                // - overflow safety
+                // - highest weight value is 15, highest abs input is 128. at most 1920
+                // - we can safely accumulate ~1M values onto i32, well within dimensions limits
                 acci = _mm512_dpbusds_epi32(acci, weight, input);
                 acci = _mm512_dpbusds_epi32(acci, zero, negative_input);
             }
 
-            acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(acci), _mm512_set1_ps(scales[qblock * QBLOCK_SIZE + row] * in_scales[qblock]), acc);
+            {
+                __m512i input = _mm512_loadu_epi8(in + qblock * QBLOCK_SIZE + 64);
+                __m512i negative_input = _mm512_sub_epi8(_mm512_setzero_si512(), input);
+                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE + 64) / 2 + row * w_rs);
+                acci = _mm512_dpbusds_epi32(acci, weight, input);
+                acci = _mm512_dpbusds_epi32(acci, zero, negative_input);
+            }
+
+            int acci_sum = hsum_i32_16(acci); // not expensive in integers
+            acc += acci_sum * scales[qblock * QBLOCK_SIZE + row] * in_scales[qblock];
         }
 
-        out[row] = (int8_t)CLAMP((out[row] + hsum_float_16(acc) / out_scale), -128.0f, 127.0f);
+        out[row] = (int8_t)CLAMP((out[row] + acc / out_scale), -128.0f, 127.0f);
     }
 }
 
@@ -185,127 +199,6 @@ void q4f32s_qi8f32s_egemv_offline(
     }
     threads.clear();
 }
-/*
-w, Weight, offset from the global pointer
-w_rs, Row stride for weights
-scales, Weight scales, offset from the global pointer
-scales_rs, Row stride for scales
-zeros, Weight zeros, offset from the global pointer
-zeros_cs, Col stride for zeros
-in, input, offset from the global pointer
-out, out, offset from the global pointer
-void q4f32s_qi8f32s_128x128_ukernel_otf(
-    uint8_t* __restrict w,
-    uint64_t w_rs,
-    float* __restrict scales,
-    uint8_t* __restrict zeros,
-    int8_t* __restrict in,
-    float in_scale,
-    float* __restrict out)
-{
-
-    for (int row = 0; row < 128; row += 4) {
-
-// Initialize accumulators
-#ifdef I32ACCUM
-        __m512i acc1 = _mm512_setzero_epi32();
-        __m512i acc2 = _mm512_setzero_epi32();
-        __m512i acc3 = _mm512_setzero_epi32();
-        __m512i acc4 = _mm512_setzero_epi32();
-#else
-        __m512 acc1 = _mm512_setzero_ps();
-        __m512 acc2 = _mm512_setzero_ps();
-        __m512 acc3 = _mm512_setzero_ps();
-        __m512 acc4 = _mm512_setzero_ps();
-#endif
-
-        // Choose Zeros
-        uint8_t _zero1 = zeros[row / 2];
-        uint8_t _zero2 = _zero1; // copy?
-        uint8_t _zero3 = zeros[row / 2 + 1];
-        uint8_t _zero4 = _zero3;
-        __m512i zero1 = _mm512_set1_epi8((_zero1 >> 4) & 0x0F);
-        __m512i zero2 = _mm512_set1_epi8(_zero2 & 0x0F);
-        __m512i zero3 = _mm512_set1_epi8((_zero3 >> 4) & 0x0F);
-        __m512i zero4 = _mm512_set1_epi8(_zero4 & 0x0F);
-
-        for (int col = 0; col < 128; col += 64) {
-            // load input 64 values
-            __m512i input = _mm512_loadu_epi8(in + col);
-
-            // load weights 64 values each.
-            __m512i weight1 = load_weights(w + col / 2 + row * w_rs);
-            __m512i weight2 = load_weights(w + col / 2 + (row + 1) * w_rs);
-            __m512i weight3 = load_weights(w + col / 2 + (row + 2) * w_rs);
-            __m512i weight4 = load_weights(w + col / 2 + (row + 3) * w_rs);
-
-            acc1 = mul_input_weight_accum(input, weight1, zero1, acc1);
-            acc2 = mul_input_weight_accum(input, weight2, zero2, acc2);
-            acc3 = mul_input_weight_accum(input, weight3, zero3, acc3);
-            acc4 = mul_input_weight_accum(input, weight4, zero4, acc4);
-        }
-
-        // This could be more efficient
-        out[row] += REDUCE_ADD(acc1) * scales[row] * in_scale;
-        out[row + 1] += REDUCE_ADD(acc2) * scales[row + 1] * in_scale;
-        out[row + 2] += REDUCE_ADD(acc3) * scales[row + 2] * in_scale;
-        out[row + 3] += REDUCE_ADD(acc4) * scales[row + 3] * in_scale;
-    }
-}
-
-void q4f32s_qi8f32s_egemv_otf(
-    uint8_t* w,
-    float* s,
-    uint8_t* z,
-    int8_t* in,
-    float* in_scales,
-    float* out,
-    int m, int n)
-{
-    assert(m % 128 == 0 && "Row size must be divisble by 128");
-    assert(n % QBLOCK_SIZE == 0 && "Col size must be divisble by 128");
-
-    auto worker = [&](uint8_t* w, float* s, uint8_t* z,
-                      int8_t* in, float* in_scales,
-                      float* out,
-                      int m, int n,
-                      int start_row, int end_row,
-                      int thread_id) {
-        int n_row_blocks = m / QBLOCK_SIZE;
-        for (int col = 0; col < n; col += 128) {
-            int col_block = col / QBLOCK_SIZE;
-            for (int row = start_row; row < end_row; row += 128) {
-                int row_block = row / QBLOCK_SIZE;
-                int block_id = row_block * n_row_blocks + col_block;
-
-                q4f32s_qi8f32s_128x128_ukernel_otf(
-                    w + (row * n / 2 + col / 2), n / 2,
-                    s + block_id * QBLOCK_SIZE,
-                    z + block_id * (QBLOCK_SIZE / 2),
-                    in + col, in_scales[col / QBLOCK_SIZE],
-                    out + row);
-            }
-        }
-    };
-
-    size_t n_threads = 4;
-    vector<thread> threads(n_threads);
-
-    int rows_per_thread = m / n_threads;
-    assert(rows_per_thread % 128 == 0 && "Thread row blocks size must be divisible by 128");
-    int start_row = 0;
-    int end_row;
-    for (int thread_id = 0; thread_id < n_threads; thread_id++) {
-        end_row = start_row + rows_per_thread;
-        threads[thread_id] = thread(worker, w, s, z, in, in_scales, out, m, n, start_row, end_row, thread_id);
-        start_row += rows_per_thread;
-    }
-    for (auto& t : threads) {
-        t.join();
-    }
-    threads.clear();
-}
-*/
 
 // Testing!
 

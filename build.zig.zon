@@ -1,0 +1,6 @@
+.{ .name = "capstone", .version = "0.0.1", .depdencies = {
+    .boost_utest = .{
+        .url = "https://github.com/boost-ext/ut/archive/refs/tags/v2.0.1.tar.gz",
+        .hash = "0f8d85da51a417c9681fe5f26bd16c2585cb4d24",
+    };
+} }

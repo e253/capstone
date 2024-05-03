@@ -6,3 +6,5 @@ tmp
 *vtune-data
 intel-sde
 cl.error
+zig-cache
+zig-out

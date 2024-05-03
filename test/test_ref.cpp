@@ -3,9 +3,9 @@
 #include <immintrin.h>
 #include <iostream>
 
-#define BROADCAST(ptr, val, len)  \
-    for (int i = 0; i < len; i++) \
-    ptr[i] = val
+#define BROADCAST(ptr, val, len)    \
+    for (int i = 0; i < (len); i++) \
+    (ptr)[i] = (val)
 
 #define SETUP_DEQUANT_TENSORS(n)                               \
     float* in = (float*)_mm_malloc(n * sizeof(float), 64);     \
@@ -34,6 +34,80 @@ TEST(NoChange, Dequant)
 
     for (int i = 0; i < n / QBLOCK_SIZE; i++) {
         EXPECT_FLOAT_EQ(1.0f, out_s[i]);
+    }
+
+    TEARDOWN_DEQUANT_TENSORS();
+}
+
+TEST(PosAndNegative, Dequant)
+{
+    int n = 1024;
+    SETUP_DEQUANT_TENSORS(n);
+    BROADCAST(in, 2.0f, n / 2);
+    BROADCAST(&in[n / 2], -2.0f, n / 2);
+    BROADCAST(out, 0, n);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+
+    ref_f32_qi8f32s(in, out, out_s, n);
+
+    for (int i = 0; i < n; i++) {
+        EXPECT_EQ(i < n / 2 ? 2 : -2, out[i]);
+    }
+
+    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+        EXPECT_FLOAT_EQ(1.0f, out_s[i]);
+    }
+
+    TEARDOWN_DEQUANT_TENSORS();
+}
+
+TEST(PosGreater, Dequant)
+{
+    int n = 1024;
+    SETUP_DEQUANT_TENSORS(n);
+    for (int i = 0; i < n; i++)
+        in[i] = (float)i;
+    BROADCAST(out, 0, n);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+
+    ref_f32_qi8f32s(in, out, out_s, n);
+
+    for (int i = 0; i < n; i++) {
+        float expected_scale = ((i / QBLOCK_SIZE + 1) * QBLOCK_SIZE - 1) / 127.0f;
+        int8_t expected = static_cast<int8_t>(round(i / expected_scale));
+        EXPECT_EQ(expected, out[i]);
+    }
+
+    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+        float expected = ((i + 1) * QBLOCK_SIZE - 1) / 127.0f;
+        EXPECT_FLOAT_EQ(expected, out_s[i]);
+    }
+
+    TEARDOWN_DEQUANT_TENSORS();
+}
+
+TEST(PosNegGreater, Dequant)
+{
+    int n = 1024;
+    SETUP_DEQUANT_TENSORS(n);
+    for (int i = 0; i < n / 2; i++)
+        in[i] = (float)i;
+    for (int i = n / 2; i < n; i++)
+        in[i] = (float)-i;
+    BROADCAST(out, 0, n);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+
+    ref_f32_qi8f32s(in, out, out_s, n);
+
+    for (int i = 0; i < n; i++) {
+        float expected_scale = ((i / QBLOCK_SIZE + 1) * QBLOCK_SIZE - 1) / 127.0f;
+        int8_t expected = static_cast<int8_t>(round((i < n / 2 ? (float)i : (float)(-i)) / expected_scale));
+        EXPECT_EQ(expected, out[i]);
+    }
+
+    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+        float expected = ((i + 1) * QBLOCK_SIZE - 1) / 127.0f;
+        EXPECT_FLOAT_EQ(expected, out_s[i]);
     }
 
     TEARDOWN_DEQUANT_TENSORS();

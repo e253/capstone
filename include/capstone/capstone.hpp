@@ -50,3 +50,13 @@ void ref_q4f32s_qi8f32s_egemv(
     float* in_scales,
     float* out,
     int m, int n);
+
+void f32_qi8f32s(float* x0, int8_t* x1, float* x1_s, int n);
+void f32_qi8f32s_egemv(
+    uint8_t* w,
+    float* s,
+    uint8_t* z,
+    int8_t* in,
+    float* in_scales,
+    float* out,
+    int m, int n);

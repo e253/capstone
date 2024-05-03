@@ -3,20 +3,40 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    // const lib = b.addStaticLibrary() -- SOON
 
-    const test_exe = b.addExecutable(.{
-        .name = "test_ref",
-        .root_source_file = .{ .path = "./test/test_ref.cpp" },
+    // Build Google Test
+    const gtest_upstream = b.dependency("gtest_upstream", .{});
+    const libgtest = b.addStaticLibrary(.{
+        .name = "libgtest",
         .target = target,
         .optimize = optimize,
     });
-    test_exe.addCSourceFiles(&.{"./src/ref.cpp"}, &.{"-std=c++17"});
-    test_exe.addIncludePath(.{ .path = "./include" });
+    libgtest.linkLibC();
+    libgtest.linkLibCpp();
+    libgtest.addCSourceFiles(.{ .root = gtest_upstream.path("googletest"), .files = &.{"src/gtest-all.cc"}, .flags = &.{"-std=c++14"} });
+    libgtest.addIncludePath(gtest_upstream.path("googletest/include"));
+    libgtest.addIncludePath(gtest_upstream.path("googletest"));
+    b.installArtifact(libgtest);
+    const cl_headers_upstream = b.dependency("cl_headers_upstream", .{});
+    _ = cl_headers_upstream;
+
+    // test_ref.cpp
+    const test_exe = b.addExecutable(.{
+        .name = "test_ref",
+        .target = target,
+        .optimize = optimize,
+    });
+    test_exe.addCSourceFiles(.{ .root = .{ .path = "." }, .files = &.{
+        "test/test_ref.cpp",
+        "src/ref.cpp",
+    }, .flags = &.{ "-Wall", "-Werror", "-std=c++14" } });
+    test_exe.addIncludePath(.{ .path = "include" });
+    test_exe.addIncludePath(gtest_upstream.path("googletest/include"));
     test_exe.linkLibC();
     test_exe.linkLibCpp();
-
+    test_exe.linkLibrary(libgtest);
     b.installArtifact(test_exe);
+
     const run_cmd = b.addRunArtifact(test_exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);

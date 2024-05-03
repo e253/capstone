@@ -1,6 +1,20 @@
-.{ .name = "capstone", .version = "0.0.1", .depdencies = {
-    .boost_utest = .{
-        .url = "https://github.com/boost-ext/ut/archive/refs/tags/v2.0.1.tar.gz",
-        .hash = "0f8d85da51a417c9681fe5f26bd16c2585cb4d24",
-    };
-} }
+// zig fmt: off
+
+.{ 
+    .name = "capstone", 
+    .version = "0.0.1", 
+    .dependencies = .{ 
+        .gtest_upstream = .{
+            .url = "https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz",
+            .hash = "1220f76996fe071a0380b8b9d10b5ebade8dbc6a53d6ab281b3c97e7e20fd75e3b79",
+        },
+        .cl_headers_upstream = .{
+            .url = "https://github.com/KhronosGroup/OpenCL-Headers/archive/refs/tags/v2023.12.14.tar.gz",
+            .hash = "1220694f71bac503053cb4746b73e3e61a7392565200de46decfd74a23818b54c287",
+        },
+    }, 
+    .paths = .{ 
+        "build.zig", 
+        "build.zig.zon" 
+    } 
+}

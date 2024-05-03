@@ -1,5 +1,5 @@
 // Reference Implementations for testing
-#include "capstone.hpp"
+#include "capstone/capstone.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cmath>

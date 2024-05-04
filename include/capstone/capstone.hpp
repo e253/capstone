@@ -41,22 +41,22 @@ void cap_ffn(captensor* up_proj, captensor* gate_proj, captensor* down_proj, cap
 // convert f16 to f32
 #define F32(x) _cvtsh_ss(x)
 
-void ref_f32_qi8f32s(float* x0, int8_t* x1, float* x1_s, int n);
+void ref_f32_qi8f32s(float* in, int8_t* out, float* out_s, int n);
 void ref_q4f32s_qi8f32s_egemv(
     uint8_t* w,
     float* s,
     uint8_t* z,
     int8_t* in,
-    float* in_scales,
+    float* in_s,
     float* out,
     int m, int n);
 
-void f32_qi8f32s(float* x0, int8_t* x1, float* x1_s, int n);
+void f32_qi8f32s(float* in, int8_t* out, float* out_s, int n);
 void f32_qi8f32s_egemv(
     uint8_t* w,
     float* s,
     uint8_t* z,
     int8_t* in,
-    float* in_scales,
+    float* in_s,
     float* out,
     int m, int n);

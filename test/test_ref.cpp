@@ -3,6 +3,43 @@
 #include <immintrin.h>
 #include <iostream>
 
+using namespace std;
+
+/* Utils */
+void ASSERT_ARRAY_EQ(float* expected, float* actual, int n)
+{
+    bool failed = false;
+    int n_different = 0;
+    for (int i = 0; i < n; i++) {
+        if (expected[i] != actual[i]) {
+            cout << "expected[" << i << "] = " << expected[i] << ", actual[" << i << "] = " << actual[i] << endl;
+            failed = true;
+            n_different++;
+        }
+    }
+    if (failed) {
+        cout << "Number of different elements: " << n_different << endl;
+        FAIL();
+    }
+}
+
+void ASSERT_ARRAY_EQ(float expected, float* actual, int n)
+{
+    bool failed = false;
+    int n_different = 0;
+    for (int i = 0; i < n; i++) {
+        if (expected != actual[i]) {
+            std::cout << "expected: " << expected << ", actual[" << i << "] = " << actual[i] << std::endl;
+            failed = true;
+            n_different++;
+        }
+    }
+    if (failed) {
+        cout << "Number of different elements: " << n_different << ", " << (float)n_different / (float)n * 100 << "%" << endl;
+        FAIL();
+    }
+}
+
 #define BROADCAST(ptr, val, len)    \
     for (int i = 0; i < (len); i++) \
     (ptr)[i] = (val)
@@ -17,7 +54,24 @@
     _mm_free(out);                 \
     _mm_free(out_s)
 
-TEST(NoChange, Dequant)
+#define SETUP_TENSORS(m, n)                                                 \
+    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);                       \
+    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64); \
+    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);         \
+    int8_t* in = (int8_t*)_mm_malloc(n, 64);                                \
+    float* in_s = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);  \
+    float* out = (float*)_mm_malloc(m * sizeof(float), 64)
+
+#define TEARDOWN_TENSORS() \
+    _mm_free(w);           \
+    _mm_free(s);           \
+    _mm_free(z);           \
+    _mm_free(in);          \
+    _mm_free(in_s);        \
+    _mm_free(out)
+/* Utils */
+
+TEST(Dequant, Positive_Below_127)
 {
     int n = 512;
     SETUP_DEQUANT_TENSORS(n);
@@ -39,7 +93,7 @@ TEST(NoChange, Dequant)
     TEARDOWN_DEQUANT_TENSORS();
 }
 
-TEST(PosAndNegative, Dequant)
+TEST(Dequant, Positive_And_Negative_Below_127)
 {
     int n = 1024;
     SETUP_DEQUANT_TENSORS(n);
@@ -61,7 +115,7 @@ TEST(PosAndNegative, Dequant)
     TEARDOWN_DEQUANT_TENSORS();
 }
 
-TEST(PosGreater, Dequant)
+TEST(Dequant, Positive_Greater_Than_127)
 {
     int n = 1024;
     SETUP_DEQUANT_TENSORS(n);
@@ -86,7 +140,7 @@ TEST(PosGreater, Dequant)
     TEARDOWN_DEQUANT_TENSORS();
 }
 
-TEST(PosNegGreater, Dequant)
+TEST(Dequant, Positive_Negative_Greater_Than_127)
 {
     int n = 1024;
     SETUP_DEQUANT_TENSORS(n);
@@ -113,23 +167,7 @@ TEST(PosNegGreater, Dequant)
     TEARDOWN_DEQUANT_TENSORS();
 }
 
-#define SETUP_TENSORS(m, n)                                                     \
-    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);                           \
-    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);     \
-    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);             \
-    int8_t* in = (int8_t*)_mm_malloc(n, 64);                                    \
-    float* in_scales = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64); \
-    float* out = (float*)_mm_malloc(m * sizeof(float), 64)
-
-#define TEARDOWN_TENSORS() \
-    _mm_free(w);           \
-    _mm_free(s);           \
-    _mm_free(z);           \
-    _mm_free(in);          \
-    _mm_free(in_scales);   \
-    _mm_free(out)
-
-TEST(Trivial, EGEMV)
+TEST(EGEMV, Trivial)
 {
     int m = 512;
     int n = 512;
@@ -140,18 +178,57 @@ TEST(Trivial, EGEMV)
     BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
     BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
     BROADCAST(in, 2, n);
-    BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
     BROADCAST(out, 0.0f, m);
 
-    ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_scales, out, m, n);
+    ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
 
-    for (int i = 0; i < m; i++) {
-        EXPECT_FLOAT_EQ(8192.0f, out[i]);
-    }
+    ASSERT_ARRAY_EQ(8192.0f, out, m);
 
     TEARDOWN_TENSORS();
 }
 
+TEST(EGEMV, Alternated_Weight_Scales_Along_Input)
+{
+    int m = 512;
+    int n = 512;
+
+    SETUP_TENSORS(m, n);
+
+    BROADCAST(w, 0x55, m * n / 2);
+    for (int row_block = 0; row_block < m / QBLOCK_SIZE; row_block++) {
+        for (int col_block = 0; col_block < n / QBLOCK_SIZE; col_block++) {
+            int block_id = row_block * n / QBLOCK_SIZE + col_block;
+            BROADCAST(&s[block_id * QBLOCK_SIZE], col_block % 2 == 0 ? 1.0f : 2.0f, QBLOCK_SIZE);
+        }
+    }
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    BROADCAST(in, 2, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+
+    ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
+
+    ASSERT_ARRAY_EQ(6144.0f, out, m);
+
+    TEARDOWN_TENSORS();
+}
+
+/*
+TEST(EGEMV, Non_Trivial_Input_Scale)
+{
+    int m = 512;
+    int n = 512;
+
+    SETUP_TENSORS(m, n);
+
+    BROADCAST(w, 0x55, m * n / 2);
+
+    ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
+
+    TEARDOWN_TENSORS();
+}
+*/
 int main(int argc, char** argv)
 {
     testing::InitGoogleTest(&argc, argv);

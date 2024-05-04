@@ -38,8 +38,7 @@ void ref_q4f32s_qi8f32s_egemv(
     float* out,
     int m, int n)
 {
-
-    assert(n >= 512 && n <= 32768 && m >= 512 && m <= 32768 && "n must be between 512 and 32768");
+    assert(512 <= n && n <= 32768 && 512 <= m && m <= 32768 && "n must be between 512 and 32768");
     assert(n % QBLOCK_SIZE == 0 && "n must be a multiple of QBLOCK_SIZE");
 
     for (int row = 0; row < m; row++) {
@@ -47,8 +46,8 @@ void ref_q4f32s_qi8f32s_egemv(
         for (int col = 0; col < n; col++) {
             // qblock_id is the index by block, which is used to for finding scales/zeros for each block
             int qblock_id = (row / QBLOCK_SIZE) * (n / QBLOCK_SIZE) + col / QBLOCK_SIZE;
-            float scale = s[qblock_id + row];
-            uint8_t zero = z[(qblock_id + row) / 2];
+            float scale = s[qblock_id * QBLOCK_SIZE + row];
+            uint8_t zero = z[(qblock_id * QBLOCK_SIZE + row) / 2];
             if (row % 2 == 0) {
                 zero >>= 4;
                 zero &= 0x0F;

@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <immintrin.h>
+#include <iostream>
 #include <limits>
 
 using namespace std;
@@ -46,8 +47,8 @@ void ref_q4f32s_qi8f32s_egemv(
         for (int col = 0; col < n; col++) {
             // qblock_id is the index by block, which is used to for finding scales/zeros for each block
             int qblock_id = (row / QBLOCK_SIZE) * (n / QBLOCK_SIZE) + col / QBLOCK_SIZE;
-            float scale = s[qblock_id * QBLOCK_SIZE + row];
-            uint8_t zero = z[(qblock_id * QBLOCK_SIZE + row) / 2];
+            float scale = s[qblock_id * QBLOCK_SIZE + row % QBLOCK_SIZE];
+            uint8_t zero = z[(qblock_id * QBLOCK_SIZE + row % QBLOCK_SIZE) / 2];
             if (row % 2 == 0) {
                 zero >>= 4;
                 zero &= 0x0F;

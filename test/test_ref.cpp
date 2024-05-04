@@ -214,8 +214,7 @@ TEST(EGEMV, Alternated_Weight_Scales_Along_Input)
     TEARDOWN_TENSORS();
 }
 
-/*
-TEST(EGEMV, Non_Trivial_Input_Scale)
+TEST(EGEMV, Unique_Input_Scales)
 {
     int m = 512;
     int n = 512;
@@ -223,12 +222,20 @@ TEST(EGEMV, Non_Trivial_Input_Scale)
     SETUP_TENSORS(m, n);
 
     BROADCAST(w, 0x55, m * n / 2);
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    BROADCAST(in, 2, n);
+    for (int i = 0; i < n / QBLOCK_SIZE; i++)
+        in_s[i] = (float)(i + 1);
+    BROADCAST(out, 0.0f, m);
 
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
 
+    ASSERT_ARRAY_EQ(20480.0f, out, m);
+
     TEARDOWN_TENSORS();
 }
-*/
+
 int main(int argc, char** argv)
 {
     testing::InitGoogleTest(&argc, argv);

@@ -1,5 +1,6 @@
 #include "capstone/capstone.hpp"
 #include "gtest/gtest.h"
+#include <cstdlib>
 #include <immintrin.h>
 #include <iostream>
 
@@ -37,6 +38,16 @@ void ASSERT_ARRAY_EQ(float expected, float* actual, int n)
     if (failed) {
         cout << "Number of different elements: " << n_different << ", " << (float)n_different / (float)n * 100 << "%" << endl;
         FAIL();
+    }
+}
+
+void shuffle_bytes(uint8_t* bytes, int len)
+{
+    for (int i = 0; i < len; i++) {
+        int j = rand() % len;
+        uint8_t tmp = bytes[i];
+        bytes[i] = bytes[j];
+        bytes[j] = tmp;
     }
 }
 
@@ -236,8 +247,69 @@ TEST(EGEMV, Unique_Input_Scales)
     TEARDOWN_TENSORS();
 }
 
+TEST(EGEMV, Unique_Weights)
+{
+    int m = 512;
+    int n = 512;
+
+    SETUP_TENSORS(m, n);
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    BROADCAST(in, 2, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            if (j % 2 == 0) {
+                w[(i * n + j) / 2] &= 0x0F; // dump upper 4 bits
+                w[(i * n + j) / 2] |= (((j % 16) << 4) & 0xF0); // set upper 4 bits
+            } else {
+                w[(i * n + j) / 2] &= 0xF0; // dump lower 4 bits
+                w[(i * n + j) / 2] |= ((j % 16) & 0x0F); // set lower 4 bits
+            }
+        }
+
+        shuffle_bytes(&w[i * n / 2], n / 2);
+    }
+
+    ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
+
+    ASSERT_ARRAY_EQ(13312.0f, out, m);
+
+    TEARDOWN_TENSORS();
+}
+
+test(EGEMV, Zero_Different_Along_Out_Channel)
+{
+    int m = 512;
+    int n = 512;
+
+    SETUP_TENSORS(m, n);
+
+    BROADCAST(w, 0x55, m * n / 2);
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    // BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    BROADCAST(in, 2, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n / QBlOCK_SIZE / 2; j++) {
+            // finish
+        }
+    }
+
+    ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
+
+    ASSERT_ARRAY_EQ(8192.0f, out, m);
+
+    TEARDOWN_TENSORS();
+}
+
 int main(int argc, char** argv)
 {
+    srand(1);
+
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

@@ -1,38 +1,7 @@
 #pragma once
 
+#include "thread.hpp"
 #include <cstdint>
-
-// nice potential api. leaving for now
-/*
-enum CapDataType {
-    Q4_F32S, // 4 bit weights, f32 scales, 4 bit zeros
-    Q4_F16S,
-    Q8_F32S,
-    Q8_F16S,
-    F16,
-    F32,
-};
-
-enum CapBackend {
-    CPU,
-    CLSVM, // shared virtual memory, allocated for igpu
-};
-
-struct captensor {
-    void* data;
-    void* scale;
-    void* zeros;
-    int ndim;
-    int dim[4];
-    DataType dtype;
-    Backend backend;
-};
-
-captensor* cap_new_tensor_2d(int rows, int cols, CapDataType dtype, CapBackend backend);
-
-void cap_egemv(captensor* A, captensor* x, captensor* y);
-void cap_ffn(captensor* up_proj, captensor* gate_proj, captensor* down_proj, captensor* x, captensor* y);
-*/
 
 #define QBLOCK_SIZE 128
 
@@ -51,7 +20,7 @@ void ref_q4f32s_qi8f32s_egemv(
     float* out,
     int m, int n);
 
-void f32_qi8f32s(float* in, int8_t* out, float* out_s, int n);
+void f32_qi8f32s(float* in, int8_t* out, float* out_s, int n, int n_threads);
 void f32_qi8f32s_egemv(
     uint8_t* w,
     float* s,
@@ -60,3 +29,29 @@ void f32_qi8f32s_egemv(
     float* in_s,
     float* out,
     int m, int n);
+
+struct f32_qi8f32s_params {
+    float* in;
+    int8_t* out;
+    float* out_s;
+    int n;
+    int tid;
+    int n_threads;
+};
+
+thread_ret_t f32_qi8f32s_thread(void* params);
+
+struct q4f32s_qi8f32s_egemv_params {
+    uint8_t* w;
+    float* s;
+    uint8_t* z;
+    int8_t* in;
+    float* in_s;
+    float* out;
+    int m;
+    int n;
+    int tid;
+    int n_threads;
+};
+
+thread_ret_t q4f32s_qi8f32s_egemv_thread(void* params);

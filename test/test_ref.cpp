@@ -1,90 +1,14 @@
 #include "capstone/capstone.hpp"
+#include "test_util.cpp"
 #include "gtest/gtest.h"
 #include <cstdlib>
-#include <immintrin.h>
-#include <iostream>
 
 using namespace std;
-
-/* Utils */
-void ASSERT_ARRAY_EQ(float* expected, float* actual, int n)
-{
-    bool failed = false;
-    int n_different = 0;
-    for (int i = 0; i < n; i++) {
-        if (expected[i] != actual[i]) {
-            cout << "expected[" << i << "] = " << expected[i] << ", actual[" << i << "] = " << actual[i] << endl;
-            failed = true;
-            n_different++;
-        }
-    }
-    if (failed) {
-        cout << "Number of different elements: " << n_different << endl;
-        FAIL();
-    }
-}
-
-void ASSERT_ARRAY_EQ(float expected, float* actual, int n)
-{
-    bool failed = false;
-    int n_different = 0;
-    for (int i = 0; i < n; i++) {
-        if (expected != actual[i]) {
-            std::cout << "expected: " << expected << ", actual[" << i << "] = " << actual[i] << std::endl;
-            failed = true;
-            n_different++;
-        }
-    }
-    if (failed) {
-        cout << "Number of different elements: " << n_different << ", " << (float)n_different / (float)n * 100 << "%" << endl;
-        FAIL();
-    }
-}
-
-void shuffle_bytes(uint8_t* bytes, int len)
-{
-    for (int i = 0; i < len; i++) {
-        int j = rand() % len;
-        uint8_t tmp = bytes[i];
-        bytes[i] = bytes[j];
-        bytes[j] = tmp;
-    }
-}
-
-#define BROADCAST(ptr, val, len)    \
-    for (int i = 0; i < (len); i++) \
-    (ptr)[i] = (val)
-
-#define SETUP_DEQUANT_TENSORS(n)                               \
-    float* in = (float*)_mm_malloc(n * sizeof(float), 64);     \
-    int8_t* out = (int8_t*)_mm_malloc(n * sizeof(int8_t), 64); \
-    float* out_s = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
-
-#define TEARDOWN_DEQUANT_TENSORS() \
-    _mm_free(in);                  \
-    _mm_free(out);                 \
-    _mm_free(out_s)
-
-#define SETUP_TENSORS(m, n)                                                 \
-    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);                       \
-    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64); \
-    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);         \
-    int8_t* in = (int8_t*)_mm_malloc(n, 64);                                \
-    float* in_s = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);  \
-    float* out = (float*)_mm_malloc(m * sizeof(float), 64)
-
-#define TEARDOWN_TENSORS() \
-    _mm_free(w);           \
-    _mm_free(s);           \
-    _mm_free(z);           \
-    _mm_free(in);          \
-    _mm_free(in_s);        \
-    _mm_free(out)
-/* Utils */
 
 TEST(Dequant, Positive_Below_127)
 {
     int n = 512;
+
     SETUP_DEQUANT_TENSORS(n);
 
     BROADCAST(in, 2.0f, n);
@@ -107,7 +31,9 @@ TEST(Dequant, Positive_Below_127)
 TEST(Dequant, Positive_And_Negative_Below_127)
 {
     int n = 1024;
+
     SETUP_DEQUANT_TENSORS(n);
+
     BROADCAST(in, 2.0f, n / 2);
     BROADCAST(&in[n / 2], -2.0f, n / 2);
     BROADCAST(out, 0, n);
@@ -129,7 +55,9 @@ TEST(Dequant, Positive_And_Negative_Below_127)
 TEST(Dequant, Positive_Greater_Than_127)
 {
     int n = 1024;
+
     SETUP_DEQUANT_TENSORS(n);
+
     for (int i = 0; i < n; i++)
         in[i] = (float)i;
     BROADCAST(out, 0, n);
@@ -154,7 +82,9 @@ TEST(Dequant, Positive_Greater_Than_127)
 TEST(Dequant, Positive_Negative_Greater_Than_127)
 {
     int n = 1024;
+
     SETUP_DEQUANT_TENSORS(n);
+
     for (int i = 0; i < n / 2; i++)
         in[i] = (float)i;
     for (int i = n / 2; i < n; i++)
@@ -253,6 +183,7 @@ TEST(EGEMV, Unique_Weights)
     int n = 512;
 
     SETUP_TENSORS(m, n);
+
     BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
     BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
     BROADCAST(in, 2, n);

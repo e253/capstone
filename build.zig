@@ -20,26 +20,54 @@ pub fn build(b: *std.Build) void {
     const cl_headers_upstream = b.dependency("cl_headers_upstream", .{});
     _ = cl_headers_upstream;
 
-    // test_ref.cpp
-    const test_exe = b.addExecutable(.{
-        .name = "test_ref",
-        .target = target,
-        .optimize = optimize,
-    });
-    test_exe.addCSourceFiles(.{ .root = .{ .path = "." }, .files = &.{
-        "test/test_ref.cpp",
-        "src/ref.cpp",
-    }, .flags = &.{ "-Wall", "-Werror", "-std=c++14" } });
-    test_exe.addIncludePath(.{ .path = "include" });
-    test_exe.addIncludePath(gtest_upstream.path("googletest/include"));
-    test_exe.linkLibC();
-    test_exe.linkLibCpp();
-    test_exe.linkLibrary(libgtest);
-    b.installArtifact(test_exe);
+    // ===== test_ref ======
+    {
+        const exe = b.addExecutable(.{
+            .name = "test_ref",
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.addCSourceFiles(.{ .root = .{ .path = "." }, .files = &.{
+            "test/test_ref.cpp",
+            "src/ref.cpp",
+        }, .flags = &.{ "-Wall", "-Werror", "-std=c++14" } });
+        exe.addIncludePath(.{ .path = "include" });
+        exe.addIncludePath(gtest_upstream.path("googletest/include"));
+        exe.linkLibC();
+        exe.linkLibCpp();
+        exe.linkLibrary(libgtest);
+        b.installArtifact(exe);
 
-    const run_cmd = b.addRunArtifact(test_exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("test_ref", "Test Reference Implementation");
-    run_step.dependOn(&run_cmd.step);
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        const run_step = b.step("test_ref", "Test Reference Implementation");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    // ===== test_cpu ======
+    {
+        const exe = b.addExecutable(.{
+            .name = "test_cpu",
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.addCSourceFiles(.{ .root = .{ .path = "." }, .files = &.{
+            "test/test_impl.cpp",
+            "src/cpu.cpp",
+            "src/thread.cpp",
+        }, .flags = &.{ "-Wall", "-Werror", "-std=c++14", "-mavx512f" } });
+        exe.addIncludePath(.{ .path = "include" });
+        exe.addIncludePath(gtest_upstream.path("googletest/include"));
+        exe.linkLibC();
+        exe.linkLibCpp();
+        exe.linkLibrary(libgtest);
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        const run_step = b.step("test_cpu", "Test CPU Implementation");
+        run_step.dependOn(&run_cmd.step);
+    }
 }

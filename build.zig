@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
             "test/test_impl.cpp",
             "src/cpu.cpp",
             "src/thread.cpp",
-        }, .flags = &.{ "-Wall", "-Werror", "-std=c++14", "-mavx512f" } });
+        }, .flags = &.{ "-Wall", "-Werror", "-std=c++14", "-mavx512f", "-mavx512bw" } });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
         exe.linkLibC();

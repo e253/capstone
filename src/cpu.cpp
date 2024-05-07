@@ -40,6 +40,8 @@ void f32_qi8f32s(float* in, int8_t* out, float* out_s, int n, int n_threads)
     params.clear();
 }
 
+#define FAST_ABS(x) _mm512_andnot_ps(_mm512_set1_ps(-0.0f), (x))
+
 thread_ret_t f32_qi8f32s_thread(void* _params)
 {
     struct f32_qi8f32s_params* params = (f32_qi8f32s_params*)_params;
@@ -54,19 +56,19 @@ thread_ret_t f32_qi8f32s_thread(void* _params)
     assert(n % QBLOCK_SIZE == 0 && "n must be a multiple of QBLOCK_SIZE");
 
     for (int j = start; j < end; j += QBLOCK_SIZE) { // qblock
-        __m512 zero = _mm512_abs_ps(_mm512_loadu_ps(in + j));
-        __m512 one = _mm512_abs_ps(_mm512_loadu_ps(in + j + 16));
-        __m512 two = _mm512_abs_ps(_mm512_loadu_ps(in + j + 32));
-        __m512 three = _mm512_abs_ps(_mm512_loadu_ps(in + j + 48));
-        __m512 four = _mm512_abs_ps(_mm512_loadu_ps(in + j + 64));
-        __m512 five = _mm512_abs_ps(_mm512_loadu_ps(in + j + 80));
-        __m512 six = _mm512_abs_ps(_mm512_loadu_ps(in + j + 96));
-        __m512 seven = _mm512_abs_ps(_mm512_loadu_ps(in + j + 112));
+        __m512 zero = _mm512_loadu_ps(in + j);
+        __m512 one = _mm512_loadu_ps(in + j + 16);
+        __m512 two = _mm512_loadu_ps(in + j + 32);
+        __m512 three = _mm512_loadu_ps(in + j + 48);
+        __m512 four = _mm512_loadu_ps(in + j + 64);
+        __m512 five = _mm512_loadu_ps(in + j + 80);
+        __m512 six = _mm512_loadu_ps(in + j + 96);
+        __m512 seven = _mm512_loadu_ps(in + j + 112);
 
-        __m512 max_value = _mm512_max_ps(zero, one);
-        __m512 max_value2 = _mm512_max_ps(two, three);
-        __m512 max_value3 = _mm512_max_ps(four, five);
-        __m512 max_value4 = _mm512_max_ps(six, seven);
+        __m512 max_value = _mm512_max_ps(FAST_ABS(zero), FAST_ABS(one));
+        __m512 max_value2 = _mm512_max_ps(FAST_ABS(two), FAST_ABS(three));
+        __m512 max_value3 = _mm512_max_ps(FAST_ABS(four), FAST_ABS(five));
+        __m512 max_value4 = _mm512_max_ps(FAST_ABS(six), FAST_ABS(seven));
         max_value = _mm512_max_ps(max_value, max_value2);
         max_value3 = _mm512_max_ps(max_value3, max_value4);
 
@@ -74,30 +76,37 @@ thread_ret_t f32_qi8f32s_thread(void* _params)
 
         float max_v = _mm512_reduce_max_ps(max_value);
 
-        float scale = max_v > 127.0f ? (max_v / 127.0f) : 1.0f;
+        float _scale = max_v > 127.0f ? (max_v / 127.0f) : 1.0f;
+        __m512 scale = _mm512_set1_ps(_scale);
 
-        out_s[j / QBLOCK_SIZE] = scale;
+        out_s[j / QBLOCK_SIZE] = _scale;
 
-        for (int i = j; i < j + QBLOCK_SIZE; i++) { // values
-            int8_t v = static_cast<int8_t>(round(in[i] / scale));
-            out[i] = v;
-        }
+        _mm_storeu_epi8(out + j, _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_div_round_ps(zero, scale, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))));
+        _mm_storeu_epi8(out + j + 16, _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_div_round_ps(one, scale, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))));
+        _mm_storeu_epi8(out + j + 32, _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_div_round_ps(two, scale, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))));
+        _mm_storeu_epi8(out + j + 48, _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_div_round_ps(three, scale, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))));
+        _mm_storeu_epi8(out + j + 64, _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_div_round_ps(four, scale, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))));
+        _mm_storeu_epi8(out + j + 80, _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_div_round_ps(five, scale, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))));
+        _mm_storeu_epi8(out + j + 96, _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_div_round_ps(six, scale, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))));
+        _mm_storeu_epi8(out + j + 112, _mm512_cvtepi32_epi8(_mm512_cvtps_epi32(_mm512_div_round_ps(seven, scale, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))));
     }
+
     return 0;
 }
 
 // gets 64 u4 from memory and expands to u8
 static inline __m512i load_weights(const uint8_t* w)
 {
-    //    Rough asm implementation
-    //    vmodqu8   (%rsi), %ymm0
-    //    vmovdu8   %ymm0, %ymm1
-    //    vpsrlw    $4, %ymm0, %ymm0
-    //    vpunpcklo %zmm0, %ymm1, %zmm0
-    //    vpand     %zmm0, %zmm2, %zmm0
-    //    # zmm2 is set of 0x0F
     __m256i tmp = _mm256_loadu_si256((const __m256i*)w);
-    __m512i weight = _mm512_unpacklo_epi8(_mm512_castsi256_si512(_mm256_srli_epi32(tmp, 4)), _mm512_castsi256_si512(tmp));
+    __m512i weight = _mm512_inserti32x8(_mm512_castsi256_si512(_mm256_srli_epi32(tmp, 4)), tmp, 1);
+    __m512i shuffle_mask = _mm512_set_epi8(
+        0, 32, 1, 33, 2, 34, 3, 35, 4, 36, 5, 37, 6, 38, 7, 39,
+        8, 40, 9, 41, 10, 42, 11, 43, 12, 44, 13, 45, 14, 46, 15, 47,
+        16, 48, 17, 49, 18, 50, 19, 51, 20, 52, 21, 53, 22, 54, 23, 55,
+        24, 56, 25, 57, 26, 58, 27, 59, 28, 60, 29, 61, 30, 62, 31, 63);
+
+    weight = _mm512_permutexvar_epi8(shuffle_mask, weight);
+
     return _mm512_and_si512(weight, _mm512_set1_epi8(0x0F));
 }
 
@@ -113,7 +122,7 @@ static inline int hsum_i32_16(__m512i x)
     return _mm_cvtsi128_si32(_mm_add_epi32(sum64, hi32));
 }
 
-static void q4f32s_qi8f32s_128x512_ukernel(
+void q4f32s_qi8f32s_128x512_ukernel(
     uint8_t* __restrict w,
     uint64_t w_rs,
     float* __restrict scales,
@@ -141,7 +150,7 @@ static void q4f32s_qi8f32s_128x512_ukernel(
                 __m512i negative_input = _mm512_sub_epi8(_mm512_setzero_si512(), input);
 
                 // load weights 64 values
-                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE) / 2 + row * w_rs);
+                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE + row * w_rs) / 2);
 
                 // AVX512_VNNI likes u8 * i8 multiplications
                 // input(i8) * (weights(u8) - zeros(u8)) == weights(u8)*input(i8) + zeros(u8)*(-input(i8))
@@ -156,7 +165,7 @@ static void q4f32s_qi8f32s_128x512_ukernel(
             {
                 __m512i input = _mm512_loadu_epi8(in + qblock * QBLOCK_SIZE + 64);
                 __m512i negative_input = _mm512_sub_epi8(_mm512_setzero_si512(), input);
-                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE + 64) / 2 + row * w_rs);
+                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE + 64 + row * w_rs) / 2);
                 acci = _mm512_dpbusd_epi32(acci, weight, input);
                 acci = _mm512_dpbusd_epi32(acci, zero, negative_input);
             }
@@ -191,7 +200,7 @@ thread_ret_t q4f32s_qi8f32s_egemv_thread(void* _params)
             int block_id = out_qblock * in_qblocks + in_qblock;
 
             q4f32s_qi8f32s_128x512_ukernel(
-                w + (row * n / 2 + col / 2), n / 2,
+                w + (row * n + col) / 2, n,
                 s + block_id * QBLOCK_SIZE,
                 z + block_id * (QBLOCK_SIZE / 2),
                 in + col, in_s + col / QBLOCK_SIZE,

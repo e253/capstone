@@ -12,4 +12,5 @@ int pthread_join(pthread_t thread, void* unused);
 
 #else
 #include <pthread.h>
+typedef void* thread_ret_t;
 #endif

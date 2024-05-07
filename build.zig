@@ -62,6 +62,9 @@ pub fn build(b: *std.Build) void {
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(libgtest);
+        if (target.result.os.tag == .linux) {
+            exe.linkSystemLibrary("pthread");
+        }
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);

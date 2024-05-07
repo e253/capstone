@@ -280,7 +280,7 @@ TEST(EGEMV, Unique_Weights)
     TEARDOWN_TENSORS();
 }
 
-test(EGEMV, Zero_Different_Along_Out_Channel)
+TEST(EGEMV, Random_Zeros)
 {
     int m = 512;
     int n = 512;
@@ -289,19 +289,29 @@ test(EGEMV, Zero_Different_Along_Out_Channel)
 
     BROADCAST(w, 0x55, m * n / 2);
     BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-    // BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++) {
+        z[i] = rand() % 256;
+    }
     BROADCAST(in, 2, n);
     BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
     BROADCAST(out, 0.0f, m);
-    for (int i = 0; i < m; i++) {
-        for (int j = 0; j < n / QBlOCK_SIZE / 2; j++) {
-            // finish
-        }
-    }
 
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
 
-    ASSERT_ARRAY_EQ(8192.0f, out, m);
+    float* expected = (float*)_mm_malloc(m * sizeof(float), 64);
+    BROADCAST(expected, 0.0f, m);
+    for (int row = 0; row < m; row++) {
+        for (int col = 0; col < n; col += QBLOCK_SIZE) {
+            int block_id = row / QBLOCK_SIZE * n / QBLOCK_SIZE + col / QBLOCK_SIZE;
+            int logical_offset = block_id * QBLOCK_SIZE + row % QBLOCK_SIZE;
+
+            uint8_t zero = row % 2 == 0 ? (z[logical_offset / 2] >> 4) & 0x0F : z[logical_offset / 2] & 0x0F;
+
+            expected[row] += (5 - zero) * 4 * 128;
+        }
+    }
+
+    ASSERT_ARRAY_EQ(expected, out, m);
 
     TEARDOWN_TENSORS();
 }

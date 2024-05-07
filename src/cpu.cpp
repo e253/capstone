@@ -86,7 +86,6 @@ thread_ret_t f32_qi8f32s_thread(void* _params)
     return 0;
 }
 
-/*
 // gets 64 u4 from memory and expands to u8
 static inline __m512i load_weights(const uint8_t* w)
 {
@@ -105,6 +104,8 @@ static inline __m512i load_weights(const uint8_t* w)
 static inline int hsum_i32_16(__m512i x)
 {
     __m256i a = _mm256_add_epi32(_mm512_castsi512_si256(x), _mm512_extracti32x8_epi32(x, 1));
+    // https://github.com/ggerganov/ggml/blob/8cd3975bf21657c6d1e80c7c61830977b962539e/src/ggml-quants.c#L93
+    // credit ggerganov
     const __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(a), _mm256_extractf128_si256(a, 1));
     const __m128i hi64 = _mm_unpackhi_epi64(sum128, sum128);
     const __m128i sum64 = _mm_add_epi32(hi64, sum128);
@@ -112,15 +113,14 @@ static inline int hsum_i32_16(__m512i x)
     return _mm_cvtsi128_si32(_mm_add_epi32(sum64, hi32));
 }
 
-void q4f32s_qi8f32s_128x512_ukernel_offline(
+static void q4f32s_qi8f32s_128x512_ukernel(
     uint8_t* __restrict w,
     uint64_t w_rs,
     float* __restrict scales,
     uint8_t* __restrict zeros,
     int8_t* __restrict in,
     float* __restrict in_scales,
-    int8_t* __restrict out,
-    float out_scale)
+    float* __restrict out)
 {
     for (int row = 0; row < 128; row++) {
         float acc = 0;
@@ -168,55 +168,21 @@ void q4f32s_qi8f32s_128x512_ukernel_offline(
     }
 }
 
-void q4f32s_qi8f32s_egemv(
-    uint8_t* w,
-    float* s,
-    uint8_t* z,
-    int8_t* in,
-    float* in_scales,
-    int8_t* out,
-    int m, int n)
+thread_ret_t q4f32s_qi8f32s_egemv_thread(void* _params)
 {
-    assert(m >= 512 && n >= 512 && "m and n must be at least 128");
-    assert(m <= 32768 && n <= 32768 && "m and n can be at most 32768");
-    assert(m % 512 == 0 && n % 512 == 0 && "m and n must be multiples of 128");
+    struct q4f32s_qi8f32s_egemv_params* params = (q4f32s_qi8f32s_egemv_params*)_params;
 
-    size_t n_threads = 3;
-    vector<thread> threads(n_threads);
+    uint8_t* w = params->w;
+    float* s = params->s;
+    uint8_t* z = params->z;
+    int8_t* in = params->in;
+    float* in_s = params->in_s;
+    float* out = params->out;
+    int m = params->m;
+    int n = params->n;
+    int start_row = params->tid * (m / params->n_threads);
+    int end_row = (params->tid + 1) * (m / params->n_threads);
 
-    int rows_per_thread = m / (n_threads + 1);
-    int start_row = 0;
-    int end_row;
-
-    for (int thread_id = 0; thread_id < n_threads; thread_id++) {
-        end_row = start_row + rows_per_thread;
-        threads[thread_id] = thread([&](uint8_t* w, float* s, uint8_t* z,
-                                        int8_t* in, float* in_scales,
-                                        int8_t* out, float* out_scales,
-                                        int m, int n,
-                                        int start_row, int end_row) {
-            int in_qblocks = n / QBLOCK_SIZE;
-            for (int col = 0; col < n; col += 512) {
-                int in_qblock = col / QBLOCK_SIZE;
-                for (int row = start_row; row < end_row; row += 128) {
-                    int out_qblock = row / QBLOCK_SIZE;
-                    int block_id = out_qblock * in_qblocks + in_qblock;
-
-                    q4f32s_qi8f32s_128x512_ukernel_offline(
-                        w + (row * n / 2 + col / 2), n / 2,
-                        s + block_id * QBLOCK_SIZE,
-                        z + block_id * (QBLOCK_SIZE / 2),
-                        in + col, in_scales + col / QBLOCK_SIZE,
-                        out + row, out_scales[row / QBLOCK_SIZE]);
-                }
-            }
-        },
-            w, s, z, in, in_scales, out, out_scales, m, n, start_row, end_row);
-
-        start_row += rows_per_thread;
-    }
-    // this thread is a worker too!
-    end_row += rows_per_thread;
     int in_qblocks = n / QBLOCK_SIZE;
     for (int col = 0; col < n; col += 512) {
         int in_qblock = col / QBLOCK_SIZE;
@@ -224,21 +190,63 @@ void q4f32s_qi8f32s_egemv(
             int out_qblock = row / QBLOCK_SIZE;
             int block_id = out_qblock * in_qblocks + in_qblock;
 
-            q4f32s_qi8f32s_128x512_ukernel_offline(
+            q4f32s_qi8f32s_128x512_ukernel(
                 w + (row * n / 2 + col / 2), n / 2,
                 s + block_id * QBLOCK_SIZE,
                 z + block_id * (QBLOCK_SIZE / 2),
-                in + col, in_scales + col / QBLOCK_SIZE,
-                out + row, out_scales[row / QBLOCK_SIZE]);
+                in + col, in_s + col / QBLOCK_SIZE,
+                out + row);
         }
     }
 
-    for (auto& t : threads) {
-        t.join();
-    }
-    threads.clear();
+    return 0;
 }
 
+void q4f32s_qi8f32s_egemv(
+    uint8_t* w,
+    float* s,
+    uint8_t* z,
+    int8_t* in,
+    float* in_scales,
+    float* out,
+    int m, int n,
+    int n_threads)
+{
+    assert(m >= 512 && n >= 512 && "m and n must be at least 128");
+    assert(m <= 32768 && n <= 32768 && "m and n can be at most 32768");
+    assert(m % 512 == 0 && n % 512 == 0 && "m and n must be multiples of 512");
+
+    vector<pthread_t> threads(n_threads);
+    vector<q4f32s_qi8f32s_egemv_params> params(n_threads);
+
+    for (int i = 0; i < n_threads - 1; i++) {
+        params[i].w = w;
+        params[i].s = s;
+        params[i].z = z;
+        params[i].in = in;
+        params[i].in_s = in_scales;
+        params[i].out = out;
+        params[i].m = m;
+        params[i].n = n;
+        params[i].tid = i;
+        params[i].n_threads = n_threads;
+        pthread_create(&threads[i], nullptr, q4f32s_qi8f32s_egemv_thread, (void*)&params[i]);
+    }
+
+    struct q4f32s_qi8f32s_egemv_params last_params = {
+        w, s, z, in, in_scales, out, m, n, n_threads - 1, n_threads
+    };
+    q4f32s_qi8f32s_egemv_thread(&last_params);
+
+    for (auto& t : threads) {
+        pthread_join(t, nullptr);
+    }
+
+    threads.clear();
+    params.clear();
+}
+
+/*
 // Testing!
 
 #define BROADCAST(ptr, val, len)  \

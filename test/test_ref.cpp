@@ -11,7 +11,7 @@ TEST(Dequant, Positive_Below_127)
 {
     int n = 512;
 
-    SETUP_DEQUANT_TENSORS(n);
+    SETUP_QUANT_TENSORS(n);
 
     BROADCAST(in, 2.0f, n);
     BROADCAST(out, 0, n);
@@ -29,14 +29,14 @@ TEST(Dequant, Positive_Below_127)
 
     ASSERT_ARRAY_EQ(2.0f, in, n);
 
-    TEARDOWN_DEQUANT_TENSORS();
+    TEARDOWN_QUANT_TENSORS();
 }
 
 TEST(Dequant, Positive_And_Negative_Below_127)
 {
     int n = 1024;
 
-    SETUP_DEQUANT_TENSORS(n);
+    SETUP_QUANT_TENSORS(n);
 
     BROADCAST(in, 2.0f, n / 2);
     BROADCAST(&in[n / 2], -2.0f, n / 2);
@@ -56,14 +56,14 @@ TEST(Dequant, Positive_And_Negative_Below_127)
     ASSERT_ARRAY_EQ(2.0f, in, n / 2);
     ASSERT_ARRAY_EQ(-2.0f, &in[n / 2], n / 2);
 
-    TEARDOWN_DEQUANT_TENSORS();
+    TEARDOWN_QUANT_TENSORS();
 }
 
 TEST(Dequant, Positive_Greater_Than_127)
 {
     int n = 1024;
 
-    SETUP_DEQUANT_TENSORS(n);
+    SETUP_QUANT_TENSORS(n);
 
     for (int i = 0; i < n; i++)
         in[i] = (float)i;
@@ -86,14 +86,14 @@ TEST(Dequant, Positive_Greater_Than_127)
     for (int i = 0; i < n; i++)
         EXPECT_EQ(in[i], (float)i);
 
-    TEARDOWN_DEQUANT_TENSORS();
+    TEARDOWN_QUANT_TENSORS();
 }
 
 TEST(Dequant, Positive_Negative_Greater_Than_127)
 {
     int n = 1024;
 
-    SETUP_DEQUANT_TENSORS(n);
+    SETUP_QUANT_TENSORS(n);
 
     for (int i = 0; i < n / 2; i++)
         in[i] = (float)i;
@@ -120,7 +120,7 @@ TEST(Dequant, Positive_Negative_Greater_Than_127)
     for (int i = n / 2; i < n; i++)
         EXPECT_FLOAT_EQ(in[i], (float)-i); // in[i] = (float)-i;
 
-    TEARDOWN_DEQUANT_TENSORS();
+    TEARDOWN_QUANT_TENSORS();
 }
 
 class EGEMV : public testing::TestWithParam<tuple<int, int>> { };
@@ -200,11 +200,11 @@ TEST_P(EGEMV, Unique_Input_Scales)
 
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
 
-    // https://en.cppreference.com/w/cpp/algorithm/for_each
     vector<float> expected(n, 16.0f);
     for (int i = 0; i < n / QBLOCK_SIZE; i++)
         for (int j = i * QBLOCK_SIZE; j < (i + 1) * QBLOCK_SIZE; j++)
             expected.data()[j] *= (i + 1);
+    // https://en.cppreference.com/w/cpp/algorithm/for_each
     struct Sum {
         void operator()(float a) { sum += a; }
         float sum { 0 };
@@ -290,13 +290,13 @@ TEST_P(EGEMV, Random_Zeros)
 
 constexpr tuple<int, int> dims[] = {
     { 512, 512 },
-    // { 512, 1024 },
+    { 512, 1024 },
     { 2048, 512 },
     { 512, 2560 },
-    // { 4096, 512 },
+    { 4096, 512 },
     { 512, 10240 },
     { 512, 14336 },
-    // { 2048, 1024 },
+    // { 2048, 1024 }, takes a long time
     // { 1024, 2560 },
     // { 4096, 1024 },
     // { 1024, 10240 },
@@ -305,7 +305,7 @@ constexpr tuple<int, int> dims[] = {
     // { 2048, 4096 },
     // { 10240, 2048 }
 };
-INSTANTIATE_TEST_SUITE_P(EGEMV, EGEMV, testing::ValuesIn(dims));
+INSTANTIATE_TEST_SUITE_P(, EGEMV, testing::ValuesIn(dims));
 
 int main(int argc, char** argv)
 {

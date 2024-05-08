@@ -56,14 +56,14 @@ void shuffle_bytes(uint8_t* bytes, int len)
     for (int i = 0; i < (len); i++) \
     (ptr)[i] = (val)
 
-#define SETUP_DEQUANT_TENSORS(n)                               \
+#define SETUP_QUANT_TENSORS(n)                                 \
     float* in = (float*)_mm_malloc(n * sizeof(float), 64);     \
     int8_t* out = (int8_t*)_mm_malloc(n * sizeof(int8_t), 64); \
     float* out_s = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
 
-#define TEARDOWN_DEQUANT_TENSORS() \
-    _mm_free(in);                  \
-    _mm_free(out);                 \
+#define TEARDOWN_QUANT_TENSORS() \
+    _mm_free(in);                \
+    _mm_free(out);               \
     _mm_free(out_s)
 
 #define SETUP_TENSORS(m, n)                                                 \

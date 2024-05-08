@@ -8,11 +8,12 @@
 
 using namespace std;
 
-TEST(Dequant, Positive_Below_127)
+class QuantContrived : public testing::TestWithParam<int> { };
+TEST_P(QuantContrived, Positive_Below_127)
 {
-    int n = 512;
+    int n = GetParam();
 
-    SETUP_DEQUANT_TENSORS(n);
+    SETUP_QUANT_TENSORS(n);
 
     BROADCAST(in, 2.0f, n);
     BROADCAST(out, 0, n);
@@ -29,14 +30,14 @@ TEST(Dequant, Positive_Below_127)
         EXPECT_FLOAT_EQ(1.0f, out_s[i]);
     }
 
-    TEARDOWN_DEQUANT_TENSORS();
+    TEARDOWN_QUANT_TENSORS();
 }
 
-TEST(Dequant, Positive_And_Negative_Below_127)
+TEST_P(QuantContrived, Positive_And_Negative_Below_127)
 {
-    int n = 1024;
+    int n = GetParam();
 
-    SETUP_DEQUANT_TENSORS(n);
+    SETUP_QUANT_TENSORS(n);
 
     BROADCAST(in, 2.0f, n / 2);
     BROADCAST(&in[n / 2], -2.0f, n / 2);
@@ -54,14 +55,14 @@ TEST(Dequant, Positive_And_Negative_Below_127)
         EXPECT_FLOAT_EQ(1.0f, out_s[i]);
     }
 
-    TEARDOWN_DEQUANT_TENSORS();
+    TEARDOWN_QUANT_TENSORS();
 }
 
-TEST(Dequant, Positive_Greater_Than_127)
+TEST_P(QuantContrived, Positive_Greater_Than_127)
 {
-    int n = 1024;
+    int n = GetParam();
 
-    SETUP_DEQUANT_TENSORS(n);
+    SETUP_QUANT_TENSORS(n);
 
     for (int i = 0; i < n; i++)
         in[i] = (float)i;
@@ -82,14 +83,14 @@ TEST(Dequant, Positive_Greater_Than_127)
         EXPECT_FLOAT_EQ(expected, out_s[i]);
     }
 
-    TEARDOWN_DEQUANT_TENSORS();
+    TEARDOWN_QUANT_TENSORS();
 }
 
-TEST(Dequant, Positive_Negative_Greater_Than_127)
+TEST_P(QuantContrived, Positive_Negative_Greater_Than_127)
 {
-    int n = 1024;
+    int n = GetParam();
 
-    SETUP_DEQUANT_TENSORS(n);
+    SETUP_QUANT_TENSORS(n);
 
     for (int i = 0; i < n / 2; i++)
         in[i] = (float)i;
@@ -112,13 +113,45 @@ TEST(Dequant, Positive_Negative_Greater_Than_127)
         EXPECT_FLOAT_EQ(expected, out_s[i]);
     }
 
-    TEARDOWN_DEQUANT_TENSORS();
+    TEARDOWN_QUANT_TENSORS();
 }
 
-TEST(EGEMV, Trivial)
+class QuantReferenceFuzz : public testing::TestWithParam<int> { };
+TEST_P(QuantReferenceFuzz, )
 {
-    int m = 512;
-    int n = 512;
+    int n = GetParam();
+
+    SETUP_QUANT_TENSORS(n);
+    int8_t* out_ref = (int8_t*)_mm_malloc(n, 64);
+    float* out_s_ref = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
+
+    for (int i = 0; i < n; i++)
+        in[i] = (float)(rand() - RAND_MAX / 2);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+    BROADCAST(out_s_ref, 0.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0, n);
+    BROADCAST(out_ref, 0, n);
+
+    int n_threads = 4;
+    f32_qi8f32s(in, out, out_s, n, n_threads);
+    ref_f32_qi8f32s(in, out_ref, out_s_ref, n);
+
+    ASSERT_ARRAY_EQ(out_ref, out, n);
+    ASSERT_ARRAY_EQ(out_s_ref, out_s, n / QBLOCK_SIZE);
+
+    TEARDOWN_QUANT_TENSORS();
+    _mm_free(out_ref);
+    _mm_free(out_s_ref);
+}
+INSTANTIATE_TEST_SUITE_P(, QuantContrived, testing::Values(512, 1024, 2048, 2560, 4096, 10240, 14336));
+INSTANTIATE_TEST_SUITE_P(, QuantReferenceFuzz, testing::Values(512, 1024, 2048, 2560, 4096, 10240, 14336));
+
+class EGEMVContrived : public testing::TestWithParam<tuple<int, int>> { };
+TEST_P(EGEMVContrived, Trivial)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -132,15 +165,24 @@ TEST(EGEMV, Trivial)
     int n_threads = 4;
     q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
 
-    ASSERT_ARRAY_EQ(8192.0f, out, m);
+    // make sure inputs are not touched.
+    // shouldn't vary between tests
+    ASSERT_ARRAY_EQ((uint8_t)0x55, w, n);
+    ASSERT_ARRAY_EQ(2.0f, s, m * n / QBLOCK_SIZE);
+    ASSERT_ARRAY_EQ((uint8_t)0x11, z, m * n / QBLOCK_SIZE / 2);
+    ASSERT_ARRAY_EQ((int8_t)2, in, n);
+    ASSERT_ARRAY_EQ(1.0f, in_s, n / QBLOCK_SIZE);
+
+    ASSERT_ARRAY_EQ(8192.0f * (n / 512), out, m);
 
     TEARDOWN_TENSORS();
 }
 
-TEST(EGEMV, Alternated_Weight_Scales_Along_Input)
+TEST_P(EGEMVContrived, Alternated_Weight_Scales_Along_Input)
 {
-    int m = 512;
-    int n = 512;
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -159,15 +201,16 @@ TEST(EGEMV, Alternated_Weight_Scales_Along_Input)
     int n_threads = 4;
     q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
 
-    ASSERT_ARRAY_EQ(6144.0f, out, m);
+    ASSERT_ARRAY_EQ(6144.0f * (n / 512), out, m);
 
     TEARDOWN_TENSORS();
 }
 
-TEST(EGEMV, Unique_Input_Scales)
+TEST_P(EGEMVContrived, Unique_Input_Scales)
 {
-    int m = 512;
-    int n = 512;
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -182,15 +225,27 @@ TEST(EGEMV, Unique_Input_Scales)
     int n_threads = 4;
     q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
 
-    ASSERT_ARRAY_EQ(20480.0f, out, m);
+    vector<float> expected(n, 16.0f);
+    for (int i = 0; i < n / QBLOCK_SIZE; i++)
+        for (int j = i * QBLOCK_SIZE; j < (i + 1) * QBLOCK_SIZE; j++)
+            expected.data()[j] *= (i + 1);
+    // https://en.cppreference.com/w/cpp/algorithm/for_each
+    struct Sum {
+        void operator()(float a) { sum += a; }
+        float sum { 0 };
+    };
+    Sum sum = for_each(expected.begin(), expected.end(), Sum());
+
+    ASSERT_ARRAY_EQ(sum.sum, out, m);
 
     TEARDOWN_TENSORS();
 }
 
-TEST(EGEMV, Unique_Weights)
+TEST_P(EGEMVContrived, Unique_Weights)
 {
-    int m = 512;
-    int n = 512;
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -217,15 +272,16 @@ TEST(EGEMV, Unique_Weights)
     int n_threads = 4;
     q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
 
-    ASSERT_ARRAY_EQ(13312.0f, out, m);
+    ASSERT_ARRAY_EQ(13312.0f * (n / 512), out, m);
 
     TEARDOWN_TENSORS();
 }
 
-TEST(EGEMV, Random_Zeros)
+TEST_P(EGEMVContrived, Random_Zeros)
 {
-    int m = 512;
-    int n = 512;
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -259,42 +315,8 @@ TEST(EGEMV, Random_Zeros)
     TEARDOWN_TENSORS();
 }
 
-class DequantRefFuzz : public testing::TestWithParam<int> { };
-TEST_P(DequantRefFuzz, DimSearch)
-{
-    int n = GetParam();
-
-    SETUP_DEQUANT_TENSORS(n);
-    float* in_ref = (float*)_mm_malloc(n * sizeof(float), 64);
-    int8_t* out_ref = (int8_t*)_mm_malloc(n, 64);
-    float* out_s_ref = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
-
-    for (int i = 0; i < n; i++) {
-        float v = (float)(rand() - RAND_MAX / 2);
-        in[i] = v;
-        in_ref[i] = v;
-    }
-    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
-    BROADCAST(out_s_ref, 0.0f, n / QBLOCK_SIZE);
-    BROADCAST(out, 0, n);
-    BROADCAST(out_ref, 0, n);
-
-    int n_threads = 4;
-    f32_qi8f32s(in, out, out_s, n, n_threads);
-    ref_f32_qi8f32s(in_ref, out_ref, out_s_ref, n);
-
-    ASSERT_ARRAY_EQ(out_ref, out, n);
-    ASSERT_ARRAY_EQ(out_s_ref, out_s, n / QBLOCK_SIZE);
-
-    TEARDOWN_DEQUANT_TENSORS();
-    _mm_free(in_ref);
-    _mm_free(out_ref);
-    _mm_free(out_s_ref);
-}
-INSTANTIATE_TEST_SUITE_P(Fuzz, DequantRefFuzz, testing::Values(512, 1024, 2048, 2560, 4096, 10240, 14336));
-
-class EGEMVRefFuzz : public testing::TestWithParam<tuple<int, int>> { };
-TEST_P(EGEMVRefFuzz, DimSearch)
+class EGEMVReferenceFuzz : public testing::TestWithParam<tuple<int, int>> { };
+TEST_P(EGEMVReferenceFuzz, )
 {
     tuple<int, int> t = GetParam();
     int m = get<0>(t);
@@ -303,16 +325,17 @@ TEST_P(EGEMVRefFuzz, DimSearch)
     SETUP_TENSORS(m, n);
     float* out_ref = (float*)_mm_malloc(m * sizeof(float), 64);
 
-    for (int i = 0; i < n; i++)
-        w[i] = 0x55; // (uint8_t)(rand() % 256);
+    for (int i = 0; i < m * n / 2; i++)
+        w[i] = (uint8_t)(rand() % 256);
     for (int i = 0; i < m * n / QBLOCK_SIZE; i++)
-        s[i] = 2.0f; // (float)(rand() - RAND_MAX / 2);
+        s[i] = (float)(rand() % 64 - 32); // smol or else float comparison get wonky
     for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
-        z[i] = 0x11; // (uint8_t)(rand() % 256);
+        z[i] = (uint8_t)(rand() % 256);
     for (int i = 0; i < n; i++)
-        in[i] = 2; // (int8_t)((rand() % 256) - 128);
+        in[i] = 2.0f; // (int8_t)((rand() % 256) - 128);
     for (int i = 0; i < n / QBLOCK_SIZE; i++)
-        in_s[i] = 1.0f; // (float)(rand() - RAND_MAX / 2);
+        in_s[i] = (float)(rand() % 64 - 32); // smol or else float comparison get wonky
+
     BROADCAST(out, 0.0f, m);
     BROADCAST(out_ref, 0.0f, m);
 
@@ -320,29 +343,31 @@ TEST_P(EGEMVRefFuzz, DimSearch)
     q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out_ref, m, n);
 
-    // for (int i = 0; i < n; i++)
-    //     EXPECT_FLOAT_EQ(out_ref[i], out[i]);
+    for (int i = 0; i < m; i++)
+        EXPECT_FLOAT_EQ(out_ref[i], out[i]);
 
     TEARDOWN_TENSORS();
     _mm_free(out_ref);
 }
 constexpr tuple<int, int> dims[] = {
+    { 512, 512 },
     { 512, 1024 },
-    // { 512, 2048 },
-    // { 512, 2560 },
-    // { 512, 4096 },
-    // { 512, 10240 },
-    // { 512, 14336 },
+    { 512, 2048 },
+    { 512, 2560 },
+    { 512, 4096 },
+    { 512, 10240 },
+    { 512, 14336 },
     { 1024, 2048 },
-    // { 1024, 2560 },
-    // { 1024, 4096 },
-    // { 1024, 10240 },
-    // { 1024, 14336 },
-    // { 2048, 2560 },
-    // { 2048, 4096 },
-    // { 2048, 10240 }
+    { 1024, 2560 },
+    { 1024, 4096 },
+    { 1024, 10240 },
+    { 1024, 14336 },
+    { 2048, 2560 },
+    { 2048, 4096 },
+    { 2048, 10240 }
 };
-INSTANTIATE_TEST_SUITE_P(Fuzz2, EGEMVRefFuzz, testing::ValuesIn(dims));
+INSTANTIATE_TEST_SUITE_P(, EGEMVContrived, testing::ValuesIn(dims));
+INSTANTIATE_TEST_SUITE_P(, EGEMVReferenceFuzz, testing::ValuesIn(dims));
 
 int main(int argc, char** argv)
 {

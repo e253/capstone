@@ -68,6 +68,7 @@ void ref_q4f32s_qi8f32s_egemv(
             float in_scale = in_scales[col / QBLOCK_SIZE];
 
             sum += ((float)(weight - zero) * scale) * (input * in_scale);
+            // sum += (float)((int)((short)weight * (short)input - (short)zero * (short)input)) * scale * in_scale; no accuracy difference
         }
         out[row] = sum;
     }

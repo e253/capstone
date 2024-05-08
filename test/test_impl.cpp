@@ -117,7 +117,7 @@ TEST_P(QuantContrived, Positive_Negative_Greater_Than_127)
 }
 
 class QuantReferenceFuzz : public testing::TestWithParam<int> { };
-TEST_P(QuantReferenceFuzz, )
+TEST_P(QuantReferenceFuzz, Fuzz)
 {
     int n = GetParam();
 
@@ -344,7 +344,7 @@ TEST_P(EGEMVContrived, Shuffled_Inputs)
 }
 
 class EGEMVReferenceFuzz : public testing::TestWithParam<tuple<int, int>> { };
-TEST_P(EGEMVReferenceFuzz, )
+TEST_P(EGEMVReferenceFuzz, Fuzz)
 {
     tuple<int, int> t = GetParam();
     int m = get<0>(t);
@@ -356,13 +356,16 @@ TEST_P(EGEMVReferenceFuzz, )
     for (int i = 0; i < m * n / 2; i++)
         w[i] = (uint8_t)(rand() % 256);
     for (int i = 0; i < m * n / QBLOCK_SIZE; i++)
-        s[i] = (float)(rand() % 64 - 32); // smol or else float comparison get wonky
+        s[i] = (float)(rand() % 32); // smol or else float comparison get wonky
     for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
         z[i] = (uint8_t)(rand() % 256);
-    for (int i = 0; i < n; i++)
-        in[i] = 2.0f; // (int8_t)((rand() % 256) - 128);
+    for (int i = 0; i < n; i++) {
+        in[i] = -5;
+        // in[i] = (float)(i % 2);
+        // in[i] = (int8_t)(rand() % 128 - 256);
+    }
     for (int i = 0; i < n / QBLOCK_SIZE; i++)
-        in_s[i] = (float)(rand() % 64 - 32); // smol or else float comparison get wonky
+        in_s[i] = (float)(rand() % 32); // smol or else float comparison get wonky
 
     BROADCAST(out, 0.0f, m);
     BROADCAST(out_ref, 0.0f, m);

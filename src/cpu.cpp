@@ -109,7 +109,7 @@ static inline __m512i load_weights(const uint8_t* w)
 
     return _mm512_and_si512(weight, _mm512_set1_epi8(0x0F));
 }
-
+/*
 static inline int hsum_i32_16(__m512i x)
 {
     __m256i a = _mm256_add_epi32(_mm512_castsi512_si256(x), _mm512_extracti32x8_epi32(x, 1));
@@ -121,7 +121,7 @@ static inline int hsum_i32_16(__m512i x)
     const __m128i hi32 = _mm_shuffle_epi32(sum64, _MM_SHUFFLE(2, 3, 0, 1));
     return _mm_cvtsi128_si32(_mm_add_epi32(sum64, hi32));
 }
-
+*/
 void q4f32s_qi8f32s_128x512_ukernel(
     uint8_t* __restrict w,
     uint64_t w_rs,
@@ -170,7 +170,7 @@ void q4f32s_qi8f32s_128x512_ukernel(
                 acci = _mm512_dpbusd_epi32(acci, zero, negative_input);
             }
 
-            acc += hsum_i32_16(acci) * scales[qblock * QBLOCK_SIZE + row] * in_scales[qblock];
+            acc += _mm512_reduce_add_epi32(acci) * scales[qblock * QBLOCK_SIZE + row] * in_scales[qblock];
         }
 
         out[row] += acc;

@@ -2,6 +2,8 @@
 #include "test_util.cpp"
 #include "gtest/gtest.h"
 #include <cstdlib>
+#include <tuple>
+#include <vector>
 
 using namespace std;
 
@@ -108,10 +110,13 @@ TEST(Dequant, Positive_Negative_Greater_Than_127)
     TEARDOWN_DEQUANT_TENSORS();
 }
 
-TEST(EGEMV, Trivial)
+class EGEMV : public testing::TestWithParam<tuple<int, int>> { };
+
+TEST_P(EGEMV, Trivial)
 {
-    int m = 512;
-    int n = 512;
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -124,15 +129,17 @@ TEST(EGEMV, Trivial)
 
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
 
-    ASSERT_ARRAY_EQ(8192.0f, out, m);
+    // ASSERT_ARRAY_EQ(8192.0f, out, m);
+    ASSERT_ARRAY_EQ(8192.0f * (n / 512), out, m);
 
     TEARDOWN_TENSORS();
 }
 
-TEST(EGEMV, Alternated_Weight_Scales_Along_Input)
+TEST_P(EGEMV, Alternated_Weight_Scales_Along_Input)
 {
-    int m = 512;
-    int n = 512;
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -150,15 +157,16 @@ TEST(EGEMV, Alternated_Weight_Scales_Along_Input)
 
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
 
-    ASSERT_ARRAY_EQ(6144.0f, out, m);
+    ASSERT_ARRAY_EQ(6144.0f * (n / 512), out, m);
 
     TEARDOWN_TENSORS();
 }
 
-TEST(EGEMV, Unique_Input_Scales)
+TEST_P(EGEMV, Unique_Input_Scales)
 {
-    int m = 512;
-    int n = 512;
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -172,15 +180,27 @@ TEST(EGEMV, Unique_Input_Scales)
 
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
 
-    ASSERT_ARRAY_EQ(20480.0f, out, m);
+    // https://en.cppreference.com/w/cpp/algorithm/for_each
+    vector<float> expected(n, 16.0f);
+    for (int i = 0; i < n / QBLOCK_SIZE; i++)
+        for (int j = i * QBLOCK_SIZE; j < (i + 1) * QBLOCK_SIZE; j++)
+            expected.data()[j] *= (i + 1);
+    struct Sum {
+        void operator()(float a) { sum += a; }
+        float sum { 0 };
+    };
+    Sum sum = for_each(expected.begin(), expected.end(), Sum());
+
+    ASSERT_ARRAY_EQ(sum.sum, out, m);
 
     TEARDOWN_TENSORS();
 }
 
-TEST(EGEMV, Unique_Weights)
+TEST_P(EGEMV, Unique_Weights)
 {
-    int m = 512;
-    int n = 512;
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -206,15 +226,16 @@ TEST(EGEMV, Unique_Weights)
 
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
 
-    ASSERT_ARRAY_EQ(13312.0f, out, m);
+    ASSERT_ARRAY_EQ(13312.0f * (n / 512), out, m);
 
     TEARDOWN_TENSORS();
 }
 
-TEST(EGEMV, Random_Zeros)
+TEST_P(EGEMV, Random_Zeros)
 {
-    int m = 512;
-    int n = 512;
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
 
     SETUP_TENSORS(m, n);
 
@@ -246,6 +267,25 @@ TEST(EGEMV, Random_Zeros)
 
     TEARDOWN_TENSORS();
 }
+
+constexpr tuple<int, int> dims[] = {
+    { 512, 512 },
+    // { 512, 1024 },
+    { 2048, 512 },
+    { 512, 2560 },
+    // { 4096, 512 },
+    { 512, 10240 },
+    { 512, 14336 },
+    // { 2048, 1024 },
+    // { 1024, 2560 },
+    // { 4096, 1024 },
+    // { 1024, 10240 },
+    // { 1024, 14336 },
+    // { 2560, 2048 },
+    // { 2048, 4096 },
+    // { 10240, 2048 }
+};
+INSTANTIATE_TEST_SUITE_P(EGEMV, EGEMV, testing::ValuesIn(dims));
 
 int main(int argc, char** argv)
 {

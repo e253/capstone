@@ -288,21 +288,48 @@ TEST_P(EGEMV, Random_Zeros)
     TEARDOWN_TENSORS();
 }
 
+TEST_P(EGEMV, Shuffled_Inputs)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+
+    BROADCAST(w, 0x55, m * n / 2);
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    for (int i = 0; i < n / 2; i++) {
+        in[i] = i % 128;
+    }
+    for (int i = n / 2; i < n; i++)
+        in[i] = -(i % 128);
+    shuffle_bytes((uint8_t*)in, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+
+    ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
+
+    ASSERT_ARRAY_EQ(0.0f, out, m);
+
+    TEARDOWN_TENSORS();
+}
+
 constexpr tuple<int, int> dims[] = {
     { 512, 512 },
     { 512, 1024 },
     { 2048, 512 },
     { 512, 2560 },
     { 4096, 512 },
-    { 512, 10240 },
-    { 512, 14336 },
-    // { 2048, 1024 }, takes a long time
-    // { 1024, 2560 },
-    // { 4096, 1024 },
+    // { 512, 10240 },
+    // { 512, 14336 },
+    { 2048, 1024 },
+    { 1024, 2560 },
+    { 4096, 1024 },
     // { 1024, 10240 },
     // { 1024, 14336 },
-    // { 2560, 2048 },
-    // { 2048, 4096 },
+    { 2560, 2048 },
+    { 2048, 4096 },
     // { 10240, 2048 }
 };
 INSTANTIATE_TEST_SUITE_P(, EGEMV, testing::ValuesIn(dims));

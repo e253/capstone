@@ -315,6 +315,34 @@ TEST_P(EGEMVContrived, Random_Zeros)
     TEARDOWN_TENSORS();
 }
 
+TEST_P(EGEMVContrived, Shuffled_Inputs)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+
+    BROADCAST(w, 0x55, m * n / 2);
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    for (int i = 0; i < n / 2; i++) {
+        in[i] = i % 128;
+    }
+    for (int i = n / 2; i < n; i++)
+        in[i] = -(i % 128);
+    shuffle_bytes((uint8_t*)in, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+
+    int n_threads = 4;
+    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+
+    ASSERT_ARRAY_EQ(0.0f, out, m);
+
+    TEARDOWN_TENSORS();
+}
+
 class EGEMVReferenceFuzz : public testing::TestWithParam<tuple<int, int>> { };
 TEST_P(EGEMVReferenceFuzz, )
 {

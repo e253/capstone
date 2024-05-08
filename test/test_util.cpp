@@ -44,11 +44,13 @@ void ASSERT_ARRAY_EQ(T expected, T* actual, int n)
 
 void shuffle_bytes(uint8_t* bytes, int len)
 {
-    for (int i = 0; i < len; i++) {
-        int j = rand() % len;
-        uint8_t tmp = bytes[i];
-        bytes[i] = bytes[j];
-        bytes[j] = tmp;
+    for (int it = 0; it < 10; it++) {
+        for (int i = 0; i < len; i++) {
+            int j = rand() % len;
+            uint8_t tmp = bytes[i];
+            bytes[i] = bytes[j];
+            bytes[j] = tmp;
+        }
     }
 }
 

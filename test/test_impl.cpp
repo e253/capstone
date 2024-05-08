@@ -2,6 +2,10 @@
 #include "test_util.cpp"
 #include "gtest/gtest.h"
 #include <cstdlib>
+#include <tuple>
+#include <vector>
+
+using namespace std;
 
 TEST(Dequant, Positive_Below_127)
 {
@@ -253,6 +257,40 @@ TEST(EGEMV, Random_Zeros)
 
     TEARDOWN_TENSORS();
 }
+
+class DequantRefFuzz : public testing::TestWithParam<int> { };
+TEST_P(DequantRefFuzz, )
+{
+    int n = GetParam();
+
+    SETUP_DEQUANT_TENSORS(n);
+    float* in_ref = (float*)_mm_malloc(n * sizeof(float), 64);
+    int8_t* out_ref = (int8_t*)_mm_malloc(n, 64);
+    float* out_s_ref = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
+
+    for (int i = 0; i < n; i++) {
+        float v = (float)rand();
+        in[i] = v;
+        in_ref[i] = v;
+    }
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+    BROADCAST(out_s_ref, 0.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0, n);
+    BROADCAST(out_ref, 0, n);
+
+    int n_threads = 4;
+    f32_qi8f32s(in, out, out_s, n, n_threads);
+    ref_f32_qi8f32s(in_ref, out_ref, out_s_ref, n);
+
+    ASSERT_ARRAY_EQ(out_ref, out, n);
+    ASSERT_ARRAY_EQ(out_s_ref, out_s, n / QBLOCK_SIZE);
+
+    TEARDOWN_DEQUANT_TENSORS();
+    _mm_free(in_ref);
+    _mm_free(out_ref);
+    _mm_free(out_s_ref);
+}
+INSTANTIATE_TEST_SUITE_P(Fuzz, DequantRefFuzz, testing::Values(512, 1024, 2048, 2560, 4096, 10240, 14336));
 
 int main(int argc, char** argv)
 {

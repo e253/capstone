@@ -3,11 +3,11 @@
 #include <immintrin.h>
 #include <iostream>
 
-
 using namespace std;
 
 /* Utils */
-void ASSERT_ARRAY_EQ(float* expected, float* actual, int n)
+template <typename T>
+void ASSERT_ARRAY_EQ(T* expected, T* actual, int n)
 {
     bool failed = false;
     int n_different = 0;
@@ -24,7 +24,8 @@ void ASSERT_ARRAY_EQ(float* expected, float* actual, int n)
     }
 }
 
-void ASSERT_ARRAY_EQ(float expected, float* actual, int n)
+template <typename T>
+void ASSERT_ARRAY_EQ(T expected, T* actual, int n)
 {
     bool failed = false;
     int n_different = 0;

@@ -99,6 +99,7 @@ static inline __m512i load_weights(const uint8_t* w)
 {
     __m256i tmp = _mm256_loadu_si256((const __m256i*)w);
     __m512i weight = _mm512_inserti32x8(_mm512_castsi256_si512(_mm256_srli_epi32(tmp, 4)), tmp, 1);
+    // wrong! only 5 bits of the index are used. real solution needed
     __m512i shuffle_mask = _mm512_set_epi8(
         0, 32, 1, 33, 2, 34, 3, 35, 4, 36, 5, 37, 6, 38, 7, 39,
         8, 40, 9, 41, 10, 42, 11, 43, 12, 44, 13, 45, 14, 46, 15, 47,

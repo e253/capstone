@@ -27,6 +27,8 @@ TEST(Dequant, Positive_Below_127)
         EXPECT_FLOAT_EQ(1.0f, out_s[i]);
     }
 
+    ASSERT_ARRAY_EQ(2.0f, in, n);
+
     TEARDOWN_DEQUANT_TENSORS();
 }
 
@@ -50,6 +52,9 @@ TEST(Dequant, Positive_And_Negative_Below_127)
     for (int i = 0; i < n / QBLOCK_SIZE; i++) {
         EXPECT_FLOAT_EQ(1.0f, out_s[i]);
     }
+
+    ASSERT_ARRAY_EQ(2.0f, in, n / 2);
+    ASSERT_ARRAY_EQ(-2.0f, &in[n / 2], n / 2);
 
     TEARDOWN_DEQUANT_TENSORS();
 }
@@ -77,6 +82,9 @@ TEST(Dequant, Positive_Greater_Than_127)
         float expected = ((i + 1) * QBLOCK_SIZE - 1) / 127.0f;
         EXPECT_FLOAT_EQ(expected, out_s[i]);
     }
+
+    for (int i = 0; i < n; i++)
+        EXPECT_EQ(in[i], (float)i);
 
     TEARDOWN_DEQUANT_TENSORS();
 }
@@ -107,6 +115,11 @@ TEST(Dequant, Positive_Negative_Greater_Than_127)
         EXPECT_FLOAT_EQ(expected, out_s[i]);
     }
 
+    for (int i = 0; i < n / 2; i++)
+        EXPECT_FLOAT_EQ(in[i], (float)i); // in[i] = (float)i;
+    for (int i = n / 2; i < n; i++)
+        EXPECT_FLOAT_EQ(in[i], (float)-i); // in[i] = (float)-i;
+
     TEARDOWN_DEQUANT_TENSORS();
 }
 
@@ -129,7 +142,14 @@ TEST_P(EGEMV, Trivial)
 
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n);
 
-    // ASSERT_ARRAY_EQ(8192.0f, out, m);
+    // make sure inputs are not touched.
+    // shouldn't vary between tests
+    ASSERT_ARRAY_EQ((uint8_t)0x55, w, n);
+    ASSERT_ARRAY_EQ(2.0f, s, m * n / QBLOCK_SIZE);
+    ASSERT_ARRAY_EQ((uint8_t)0x11, z, m * n / QBLOCK_SIZE / 2);
+    ASSERT_ARRAY_EQ((int8_t)2, in, n);
+    ASSERT_ARRAY_EQ(1.0f, in_s, n / QBLOCK_SIZE);
+
     ASSERT_ARRAY_EQ(8192.0f * (n / 512), out, m);
 
     TEARDOWN_TENSORS();

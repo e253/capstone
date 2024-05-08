@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
         exe.addCSourceFiles(.{ .root = .{ .path = "." }, .files = &.{
             "test/test_ref.cpp",
             "src/ref.cpp",
-        }, .flags = &.{ "-Wall", "-Werror", "-std=c++14" } });
+        }, .flags = &.{ "-Wall", "-Werror", "-std=c++17" } });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
         exe.linkLibC();
@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
             "src/cpu.cpp",
             "src/thread.cpp",
             "src/ref.cpp",
-        }, .flags = &.{ "-Wall", "-Werror", "-std=c++14", "-mavx512f", "-mavx512bw" } });
+        }, .flags = &.{ "-Wall", "-Werror", "-std=c++17", "-mavx512f", "-mavx512bw" } });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
         exe.linkLibC();

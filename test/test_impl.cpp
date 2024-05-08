@@ -2,6 +2,7 @@
 #include "test_util.cpp"
 #include "gtest/gtest.h"
 #include <cstdlib>
+#include <limits>
 #include <tuple>
 #include <vector>
 
@@ -259,7 +260,7 @@ TEST(EGEMV, Random_Zeros)
 }
 
 class DequantRefFuzz : public testing::TestWithParam<int> { };
-TEST_P(DequantRefFuzz, )
+TEST_P(DequantRefFuzz, DimSearch)
 {
     int n = GetParam();
 
@@ -269,7 +270,7 @@ TEST_P(DequantRefFuzz, )
     float* out_s_ref = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
 
     for (int i = 0; i < n; i++) {
-        float v = (float)rand();
+        float v = (float)(rand() - RAND_MAX / 2);
         in[i] = v;
         in_ref[i] = v;
     }
@@ -291,6 +292,57 @@ TEST_P(DequantRefFuzz, )
     _mm_free(out_s_ref);
 }
 INSTANTIATE_TEST_SUITE_P(Fuzz, DequantRefFuzz, testing::Values(512, 1024, 2048, 2560, 4096, 10240, 14336));
+
+class EGEMVRefFuzz : public testing::TestWithParam<tuple<int, int>> { };
+TEST_P(EGEMVRefFuzz, DimSearch)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+    float* out_ref = (float*)_mm_malloc(m * sizeof(float), 64);
+
+    for (int i = 0; i < n; i++)
+        w[i] = 0x55; // (uint8_t)(rand() % 256);
+    for (int i = 0; i < m * n / QBLOCK_SIZE; i++)
+        s[i] = 2.0f; // (float)(rand() - RAND_MAX / 2);
+    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
+        z[i] = 0x11; // (uint8_t)(rand() % 256);
+    for (int i = 0; i < n; i++)
+        in[i] = 2; // (int8_t)((rand() % 256) - 128);
+    for (int i = 0; i < n / QBLOCK_SIZE; i++)
+        in_s[i] = 1.0f; // (float)(rand() - RAND_MAX / 2);
+    BROADCAST(out, 0.0f, m);
+    BROADCAST(out_ref, 0.0f, m);
+
+    int n_threads = 4;
+    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+    ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out_ref, m, n);
+
+    // for (int i = 0; i < n; i++)
+    //     EXPECT_FLOAT_EQ(out_ref[i], out[i]);
+
+    TEARDOWN_TENSORS();
+    _mm_free(out_ref);
+}
+constexpr tuple<int, int> dims[] = {
+    { 512, 1024 },
+    // { 512, 2048 },
+    // { 512, 2560 },
+    // { 512, 4096 },
+    // { 512, 10240 },
+    // { 512, 14336 },
+    { 1024, 2048 },
+    // { 1024, 2560 },
+    // { 1024, 4096 },
+    // { 1024, 10240 },
+    // { 1024, 14336 },
+    // { 2048, 2560 },
+    // { 2048, 4096 },
+    // { 2048, 10240 }
+};
+INSTANTIATE_TEST_SUITE_P(Fuzz2, EGEMVRefFuzz, testing::ValuesIn(dims));
 
 int main(int argc, char** argv)
 {

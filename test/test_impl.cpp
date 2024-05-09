@@ -8,6 +8,68 @@
 
 using namespace std;
 
+TEST(QuantShuffle, One_Block)
+{
+    float in[128];
+    for (int i = 0; i < 128; i++)
+        in[i] = i % 64;
+    int8_t expected[128];
+    for (int i = 0; i < 32; i++)
+        expected[i] = i * 2;
+    for (int i = 0; i < 32; i++)
+        expected[i + 32] = i * 2 + 1;
+    for (int i = 0; i < 32; i++)
+        expected[i + 64] = i * 2;
+    for (int i = 0; i < 32; i++)
+        expected[i + 96] = i * 2 + 1;
+
+    int8_t out[128];
+    BROADCAST(out, 0, 128);
+    float out_s = 0;
+
+    int n_threads = 1;
+    f32_qi8f32s(in, out, &out_s, 128, n_threads);
+
+    ASSERT_ARRAY_EQ(out, expected, 128);
+}
+
+TEST(QuantShuffle, One_Full_Block)
+{
+    int n = 128;
+
+    SETUP_QUANT_TENSORS(n);
+
+    for (int i = 0; i < n; i++)
+        in[i] = (float)i;
+    BROADCAST(out, 0, n);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+
+    int n_threads = 1;
+    f32_qi8f32s(in, out, out_s, n, n_threads);
+    EXPECT_EQ(1.0f, out_s[0]);
+
+    vector<int8_t> expected(n, 0.0f);
+    for (int i = 0; i < n; i++)
+        expected[i] = i;
+    avx512_input_shuffle(expected.data(), n);
+
+    bool failed = false;
+    int n_different = 0;
+    for (int i = 0; i < n; i++) {
+        if (expected[i] != out[i]) {
+            cout << "expected[" << i << "] = " << (int)expected[i] << ", actual[" << i << "] = " << (int)out[i] << endl;
+            failed = true;
+            n_different++;
+        }
+    }
+    if (failed) {
+        cout << "Number of different elements: " << n_different << endl;
+        FAIL();
+    }
+
+    TEARDOWN_QUANT_TENSORS();
+}
+
 class QuantContrived : public testing::TestWithParam<int> { };
 TEST_P(QuantContrived, Positive_Below_127)
 {
@@ -72,16 +134,16 @@ TEST_P(QuantContrived, Positive_Greater_Than_127)
     int n_threads = 4;
     f32_qi8f32s(in, out, out_s, n, n_threads);
 
+    vector<int8_t> expected(n, 0.0f);
+    vector<float> expected_s(n / QBLOCK_SIZE, 0.0f);
     for (int i = 0; i < n; i++) {
         float expected_scale = ((i / QBLOCK_SIZE + 1) * QBLOCK_SIZE - 1) / 127.0f;
-        int8_t expected = static_cast<int8_t>(round(i / expected_scale));
-        EXPECT_EQ(expected, out[i]);
+        expected[i] = static_cast<int8_t>(round(i / expected_scale));
+        expected_s[i / QBLOCK_SIZE] = expected_scale;
     }
-
-    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
-        float expected = ((i + 1) * QBLOCK_SIZE - 1) / 127.0f;
-        EXPECT_FLOAT_EQ(expected, out_s[i]);
-    }
+    avx512_input_shuffle(expected.data(), n);
+    ASSERT_ARRAY_EQ(expected.data(), out, n);
+    ASSERT_ARRAY_EQ(expected_s.data(), out_s, n / QBLOCK_SIZE);
 
     TEARDOWN_QUANT_TENSORS();
 }
@@ -102,20 +164,21 @@ TEST_P(QuantContrived, Positive_Negative_Greater_Than_127)
     int n_threads = 4;
     f32_qi8f32s(in, out, out_s, n, n_threads);
 
-    for (int i = 0; i < n; i++) {
-        float expected_scale = ((i / QBLOCK_SIZE + 1) * QBLOCK_SIZE - 1) / 127.0f;
-        int8_t expected = static_cast<int8_t>(round((i < n / 2 ? (float)i : (float)(-i)) / expected_scale));
-        EXPECT_EQ(expected, out[i]);
+    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+        float scale = ((i + 1) * QBLOCK_SIZE - 1) / 127.0f;
+        EXPECT_EQ(scale, out_s[i]);
     }
 
-    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
-        float expected = ((i + 1) * QBLOCK_SIZE - 1) / 127.0f;
-        EXPECT_FLOAT_EQ(expected, out_s[i]);
+    vector<int8_t> expected(n, 0.0f);
+    for (int i = 0; i < n; i++) {
+        float expected_scale = ((i / QBLOCK_SIZE + 1) * QBLOCK_SIZE - 1) / 127.0f;
+        expected[i] = static_cast<int8_t>(round((i < n / 2 ? (float)i : (float)(-i)) / expected_scale));
     }
+    avx512_input_shuffle(expected.data(), n);
+    ASSERT_ARRAY_EQ(expected.data(), out, n);
 
     TEARDOWN_QUANT_TENSORS();
 }
-
 class QuantReferenceFuzz : public testing::TestWithParam<int> { };
 TEST_P(QuantReferenceFuzz, Fuzz)
 {
@@ -126,7 +189,7 @@ TEST_P(QuantReferenceFuzz, Fuzz)
     float* out_s_ref = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
 
     for (int i = 0; i < n; i++)
-        in[i] = (float)(rand() - RAND_MAX / 2);
+        in[i] = (float)(rand() % 1024 - 512);
     BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
     BROADCAST(out_s_ref, 0.0f, n / QBLOCK_SIZE);
     BROADCAST(out, 0, n);
@@ -136,6 +199,7 @@ TEST_P(QuantReferenceFuzz, Fuzz)
     f32_qi8f32s(in, out, out_s, n, n_threads);
     ref_f32_qi8f32s(in, out_ref, out_s_ref, n);
 
+    avx512_input_shuffle(out_ref, n);
     ASSERT_ARRAY_EQ(out_ref, out, n);
     ASSERT_ARRAY_EQ(out_s_ref, out_s, n / QBLOCK_SIZE);
 
@@ -352,36 +416,50 @@ TEST_P(EGEMVReferenceFuzz, Fuzz)
 
     SETUP_TENSORS(m, n);
     float* out_ref = (float*)_mm_malloc(m * sizeof(float), 64);
+    int8_t* in_shuf = (int8_t*)_mm_malloc(n, 64);
 
+    // ranges are large enough to produce random looking values,
+    // but not so large that float error ruins equality checks.
     for (int i = 0; i < m * n / 2; i++)
         w[i] = (uint8_t)(rand() % 256);
     for (int i = 0; i < m * n / QBLOCK_SIZE; i++)
-        s[i] = (float)(rand() % 32); // smol or else float comparison get wonky
+        s[i] = (float)(rand() % 48);
     for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++)
         z[i] = (uint8_t)(rand() % 256);
-    for (int i = 0; i < n; i++) {
-        in[i] = -5;
-        // in[i] = (float)(i % 2);
-        // in[i] = (int8_t)(rand() % 128 - 256);
-    }
+    for (int i = 0; i < n; i++)
+        in[i] = (int8_t)(rand() % 24 - 12);
+    memcpy(in_shuf, in, n);
+    avx512_input_shuffle(in_shuf, n);
     for (int i = 0; i < n / QBLOCK_SIZE; i++)
-        in_s[i] = (float)(rand() % 32); // smol or else float comparison get wonky
+        in_s[i] = (float)(rand() % 32);
 
     BROADCAST(out, 0.0f, m);
     BROADCAST(out_ref, 0.0f, m);
 
     int n_threads = 4;
-    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+    q4f32s_qi8f32s_egemv(w, s, z, in_shuf, in_s, out, m, n, n_threads);
     ref_q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out_ref, m, n);
 
-    for (int i = 0; i < m; i++)
-        EXPECT_FLOAT_EQ(out_ref[i], out[i]);
+    bool failed = false;
+    int n_different = 0;
+    for (int i = 0; i < m; i++) {
+        if (out[i] != out_ref[i]) {
+            cout << "ref[" << i << "] = " << out_ref[i] << ", opt[" << i << "] = " << out[i] << "; diff: " << (abs(out_ref[i] - out[i])) << endl;
+            failed = true;
+            n_different++;
+        }
+    }
+    if (failed) {
+        cout << "Number of different elements: " << n_different << "/" << m << ", " << (float)n_different / (float)m * 100 << "%" << endl;
+        FAIL();
+    }
 
     TEARDOWN_TENSORS();
     _mm_free(out_ref);
 }
 constexpr tuple<int, int> dims[] = {
     { 512, 512 },
+    { 1024, 1024 },
     { 512, 1024 },
     { 512, 2048 },
     { 512, 2560 },

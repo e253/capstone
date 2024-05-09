@@ -7,6 +7,39 @@
 
 using namespace std;
 
+TEST(Dequant, AVX_512_Shuffle)
+{
+    int8_t in[128];
+    for (int i = 0; i < 128; i++)
+        in[i] = i;
+
+    int8_t out[128];
+    for (int i = 0; i < 32; i++)
+        out[i] = i * 2;
+    for (int i = 0; i < 32; i++)
+        out[i + 32] = i * 2 + 1;
+    for (int i = 0; i < 32; i++)
+        out[i + 64] = i * 2 + 64;
+    for (int i = 0; i < 32; i++)
+        out[i + 96] = i * 2 + 65;
+
+    avx512_input_shuffle(in, 128);
+
+    bool failed = false;
+    int n_different = 0;
+    for (int i = 0; i < 64; i++) {
+        if (in[i] != out[i]) {
+            cout << "expected[" << i << "] = " << (int)out[i] << ", actual[" << i << "] = " << (int)in[i] << endl;
+            failed = true;
+            n_different++;
+        }
+    }
+    if (failed) {
+        cout << "Number of different elements: " << n_different << endl;
+        FAIL();
+    }
+}
+
 TEST(Dequant, Positive_Below_127)
 {
     int n = 512;

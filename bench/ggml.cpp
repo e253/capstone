@@ -1,6 +1,8 @@
+#include "ggml/ggml.h"
+#include "argparse/argparse.hpp"
+#include "ggml/ggml-backend.h"
 #include <chrono>
-#include <ggml/ggml-backend.h>
-#include <ggml/ggml.h>
+#include <cstring>
 #include <iostream>
 
 using namespace std;
@@ -21,6 +23,7 @@ void bench_llama_ffn()
     // we do not do the elementwise multiply
     // we do not apply SwiGLU non-linearity in the hidden_dim
     // just the matmuls. skips 14k ops out of 176M total (4096 * 14336 * 3)
+
     cout << "Benchmarking LLAMA FFN ..." << endl;
     cout << "down_proj @ (up_proj @ x * gate_proj @ x)" << endl;
     cout << "Hidden Dim: 14436, Dim: 4096" << endl;
@@ -34,7 +37,6 @@ void bench_llama_ffn()
     }
 
     struct ggml_init_params params = {
-        // 100 MB
         .mem_size = ctx_size,
         .mem_buffer = NULL,
         .no_alloc = false,
@@ -57,7 +59,8 @@ void bench_llama_ffn()
     ggml_tensor* gate_proj_x = ggml_mul_mat(ctx, gate_proj, x);
     ggml_tensor* y = ggml_mul_mat(ctx, down_proj, up_proj_x);
 
-    const int NIT = 200;
+    const long long NIT = 200;
+
     auto start = chrono::high_resolution_clock::now();
     for (int i = 0; i < NIT; i++) {
         struct ggml_cgraph* gf = ggml_new_graph(ctx);
@@ -66,13 +69,14 @@ void bench_llama_ffn()
     }
     auto end = chrono::high_resolution_clock::now();
 
-    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+    double sec = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+    long long flops_processed = 4096 * 14336 * 6 * NIT;
+    double GFLOPS = (double)flops_processed / sec * 1e-9;
+
     cout << "total: " << sec << " (s)" << endl;
     cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
 
-    uint64_t flops_processed = 4096 * 14336 * 6 * (uint64_t)NIT;
-    double flops_per_sec = flops_processed / sec;
-    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
+    cout << "GFLOPS: " << GFLOPS << endl;
     cout << endl;
 
     ggml_free(ctx);
@@ -115,7 +119,7 @@ void bench_llama_up_proj()
     for (int i = 0; i < NIT; i++) {
         struct ggml_cgraph* gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, out);
-        ggml_graph_compute_with_ctx(ctx, gf, /* n_threads = */ 4);
+        ggml_graph_compute_with_ctx(ctx, gf, 4);
         // outputs in f32, offline quant
     }
     auto end = chrono::high_resolution_clock::now();
@@ -132,11 +136,32 @@ void bench_llama_up_proj()
     ggml_free(ctx);
 }
 
-int main()
+int main(int argc, char** argv)
 {
-    cout << "NUMA?: " << ggml_is_numa() << endl;
-    cout << endl;
+    cout << "NUMA_ENABLED: " << (ggml_is_numa() ? string("True") : string("False")) << endl
+         << endl;
 
-    bench_llama_up_proj();
-    bench_llama_ffn();
+    argparse::ArgumentParser parser("zig build bench_ggml --");
+    parser.add_argument("--llama_ffn").flag().help("Bench LLAMA FFN");
+    parser.add_argument("--llama_up_proj").flag().help("Bench LLAMA up_proj");
+
+    try {
+        parser.parse_args(argc, argv);
+    } catch (const std::exception& err) {
+        cerr << err.what() << endl;
+        cerr << parser << endl;
+        cerr << "Invalid arguments. Exiting." << endl;
+        exit(1);
+    }
+
+    if (parser["llama_ffn"] == true) {
+        bench_llama_ffn();
+    }
+    if (parser["llama_up_proj"] == true) {
+        bench_llama_up_proj();
+    }
+    if (parser["llama_ffn"] == false && parser["llama_up_proj"] == false) {
+        cout << "No benchmarks Selected" << endl;
+        cout << parser << endl;
+    }
 }

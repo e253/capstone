@@ -8,6 +8,10 @@
             .url = "https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz",
             .hash = "1220f76996fe071a0380b8b9d10b5ebade8dbc6a53d6ab281b3c97e7e20fd75e3b79",
         },
+        .argparse = .{
+            .url = "https://github.com/p-ranav/argparse/archive/refs/tags/v3.0.tar.gz",
+            .hash = "122085b939c2c75971aec88d51fc62a2fada8d44f3fe101a958519b24ffdc8217b7f",
+        },
         .cl_headers_upstream = .{
             .url = "https://github.com/KhronosGroup/OpenCL-Headers/archive/refs/tags/v2023.12.14.tar.gz",
             .hash = "1220694f71bac503053cb4746b73e3e61a7392565200de46decfd74a23818b54c287",

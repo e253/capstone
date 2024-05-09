@@ -6,17 +6,18 @@ pub fn build(b: *std.Build) void {
 
     // Build Google Test
     const gtest_upstream = b.dependency("gtest_upstream", .{});
-    const libgtest = b.addStaticLibrary(.{
-        .name = "libgtest",
+    const gtest = b.addStaticLibrary(.{
+        .name = "gtest",
         .target = target,
         .optimize = optimize,
     });
-    libgtest.linkLibC();
-    libgtest.linkLibCpp();
-    libgtest.addCSourceFiles(.{ .root = gtest_upstream.path("googletest"), .files = &.{"src/gtest-all.cc"}, .flags = &.{"-std=c++14"} });
-    libgtest.addIncludePath(gtest_upstream.path("googletest/include"));
-    libgtest.addIncludePath(gtest_upstream.path("googletest"));
-    b.installArtifact(libgtest);
+    gtest.linkLibC();
+    gtest.linkLibCpp();
+    gtest.addCSourceFiles(.{ .root = gtest_upstream.path("googletest"), .files = &.{"src/gtest-all.cc"}, .flags = &.{"-std=c++14"} });
+    gtest.addIncludePath(gtest_upstream.path("googletest/include"));
+    gtest.addIncludePath(gtest_upstream.path("googletest"));
+    b.installArtifact(gtest);
+    const argparse = b.dependency("argparse", .{});
     const cl_headers_upstream = b.dependency("cl_headers_upstream", .{});
     _ = cl_headers_upstream;
 
@@ -35,7 +36,7 @@ pub fn build(b: *std.Build) void {
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
         exe.linkLibC();
         exe.linkLibCpp();
-        exe.linkLibrary(libgtest);
+        exe.linkLibrary(gtest);
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
@@ -62,7 +63,7 @@ pub fn build(b: *std.Build) void {
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
         exe.linkLibC();
         exe.linkLibCpp();
-        exe.linkLibrary(libgtest);
+        exe.linkLibrary(gtest);
         if (target.result.os.tag == .linux) {
             exe.linkSystemLibrary("pthread");
         }
@@ -72,6 +73,34 @@ pub fn build(b: *std.Build) void {
         run_cmd.step.dependOn(b.getInstallStep());
         if (b.args) |args| run_cmd.addArgs(args);
         const run_step = b.step("test_cpu", "Test CPU Implementation");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    // ===== bench ggml =====
+    {
+        const exe = b.addExecutable(.{
+            .name = "bench_ggml",
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.addCSourceFiles(.{ .root = .{
+            .path = "bench",
+        }, .files = &.{
+            "ggml.cpp",
+        }, .flags = &.{
+            "-std=c++17",
+        } });
+        exe.addIncludePath(.{ .path = "include" });
+        exe.linkLibC();
+        exe.linkLibCpp();
+        exe.addIncludePath(argparse.path("include"));
+        exe.linkSystemLibrary("ggml");
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        const run_step = b.step("bench_ggml", "Benchmark GGML");
         run_step.dependOn(&run_cmd.step);
     }
 }

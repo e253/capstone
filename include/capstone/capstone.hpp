@@ -56,3 +56,50 @@ struct q4f32s_qi8f32s_egemv_params {
 };
 
 thread_ret_t q4f32s_qi8f32s_egemv_thread(void* params);
+
+struct q4f32s_tensor {
+    uint8_t* data;
+    uint8_t* z;
+    float* s;
+    int m;
+    int n;
+};
+
+struct f32_vector {
+    float* data;
+    int n;
+};
+
+struct qi8f32s_vector {
+    int8_t* data;
+    float* s;
+    int n;
+};
+
+void q4f32s_qi8f32s_ffn(
+    q4f32s_tensor* up_proj,
+    q4f32s_tensor* gate_proj,
+    q4f32s_tensor* down_proj,
+    f32_vector* x, qi8f32s_vector* xq,
+    f32_vector* y,
+    f32_vector* s1, f32_vector* s2,
+    int n_threads);
+// Dequant(x) --> xq --> up_proj   --> F32 (scratch2)
+//                   --> gate_proj --> F32 (scratch1) (abandoned)
+//                                                   --> down_proj --> F32 (scratch1)
+
+struct q4f32s_qi8f32s_ffn_params {
+    q4f32s_tensor* up_proj;
+    q4f32s_tensor* gate_proj;
+    q4f32s_tensor* down_proj;
+    f32_vector* x;
+    qi8f32s_vector* xq;
+    f32_vector* y;
+    f32_vector* s1;
+    f32_vector* s2;
+    int n_threads;
+    int tid;
+    pthread_barrier_t* op_barrier;
+};
+
+thread_ret_t q4f32s_qi8f32s_ffn_thread(void* params);

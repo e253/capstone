@@ -473,7 +473,9 @@ constexpr tuple<int, int> dims[] = {
     { 1024, 14336 },
     { 2048, 2560 },
     { 2048, 4096 },
-    { 2048, 10240 }
+    { 2048, 10240 },
+    { 4096, 14336 },
+    { 14336, 4096 },
 };
 INSTANTIATE_TEST_SUITE_P(, EGEMVContrived, testing::ValuesIn(dims));
 INSTANTIATE_TEST_SUITE_P(, EGEMVReferenceFuzz, testing::ValuesIn(dims));

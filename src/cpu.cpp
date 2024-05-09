@@ -250,722 +250,156 @@ void q4f32s_qi8f32s_egemv(
     params.clear();
 }
 
-/*
-// Testing!
-
-#define BROADCAST(ptr, val, len)  \
-    for (int i = 0; i < len; i++) \
-    ptr[i] = val
-
-void assert_arr_eq_i8(int8_t* arr, int8_t expected, int len, string passed_msg, string failed_msg)
+void q4f32s_qi8f32s_ffn(
+    q4f32s_tensor* up_proj,
+    q4f32s_tensor* gate_proj,
+    q4f32s_tensor* down_proj,
+    f32_vector* x, qi8f32s_vector* xq,
+    f32_vector* y,
+    f32_vector* s1, f32_vector* s2,
+    int n_threads)
 {
-    bool passed = true;
-    for (int i = 0; i < len; i++) {
-        if (arr[i] != expected) {
-            cout << "Output[" << i << "] = " << (int)arr[i] << endl;
-            passed = false;
-        }
+    assert(up_proj->m == gate_proj->m && up_proj->n == gate_proj->n && up_proj->m == down_proj->n);
+    assert(n_threads == 4 || n_threads == 2);
+
+    vector<pthread_t> threads(n_threads - 1);
+    vector<q4f32s_qi8f32s_ffn_params> params(n_threads);
+
+    pthread_barrier_t op_barrier;
+    pthread_barrier_init(&op_barrier, nullptr, n_threads);
+
+    for (int i = 0; i < n_threads - 1; i++) {
+        params[i].up_proj = up_proj;
+        params[i].gate_proj = gate_proj;
+        params[i].down_proj = down_proj;
+        params[i].x = x;
+        params[i].xq = xq;
+        params[i].y = y;
+        params[i].s1 = s1;
+        params[i].s2 = s2;
+        params[i].tid = i;
+        params[i].n_threads = n_threads;
+        params[i].op_barrier = &op_barrier;
+        pthread_create(&threads[i], nullptr, q4f32s_qi8f32s_ffn_thread, (void*)&params[i]);
     }
-    if (passed) {
-        cout << passed_msg << endl;
-    } else {
-        cout << failed_msg << endl;
-        exit(0);
+
+    struct q4f32s_qi8f32s_ffn_params last_params = {
+        up_proj,
+        gate_proj,
+        down_proj,
+        x,
+        xq,
+        y,
+        s1,
+        s2,
+        n_threads,
+        n_threads - 1,
+        &op_barrier,
+    };
+    q4f32s_qi8f32s_ffn_thread(&last_params);
+
+    for (auto& t : threads) {
+        pthread_join(t, nullptr);
     }
+
+    pthread_barrier_destroy(&op_barrier);
+
+    threads.clear();
+    params.clear();
 }
 
-void test_128x512_offline()
+thread_ret_t q4f32s_qi8f32s_ffn_thread(void* _params)
 {
-    cout << "### q4f32s_qi8f32s_128x512_ukernel_offline() ###" << endl;
+    struct q4f32s_qi8f32s_ffn_params* params = (q4f32s_qi8f32s_ffn_params*)_params;
 
-    int m = 128;
-    int n = 512;
+    q4f32s_tensor* up_proj = params->up_proj;
+    // q4f32s_tensor* gate_proj = params->gate_proj;
+    q4f32s_tensor* down_proj = params->down_proj;
+    f32_vector* x = params->x;
+    qi8f32s_vector* xq = params->xq;
+    f32_vector* y = params->y;
+    f32_vector* s1 = params->s1;
+    f32_vector* s2 = params->s2;
+    int n_threads = params->n_threads;
+    int tid = params->tid;
+    pthread_barrier_t* op_barrier = params->op_barrier;
 
-    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
-    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
-    int8_t* in = (int8_t*)_mm_malloc(n * sizeof(float), 64);
-    int8_t* out = (int8_t*)_mm_malloc(m, 64);
+    // Dequant(x) --> qi8 (4096,) --> up_proj (14336, 4096) --> s1 (14336,) --> xq (14336,) --> down_proj (14336, 4096) --> y (4096,)
+    //                    --> gate_proj --> F32 (scratch2) (abandoned)
 
-    // 1 - Trivial
-    {
-        BROADCAST(w, 0x55, m * n / 2);
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-        memset(out, 0, m);
-        float out_s = 81.96f;
+    // Q(x) --> xq
+    struct f32_qi8f32s_params dequant_x_params = {
+        x->data,
+        xq->data,
+        xq->s,
+        x->n,
+        tid,
+        n_threads,
+    };
+    f32_qi8f32s_thread(&dequant_x_params);
 
-        q4f32s_qi8f32s_128x512_ukernel_offline(
-            w, n / 2,
-            s, z,
-            in, in_s,
-            out, out_s);
+    pthread_barrier_wait(op_barrier);
 
-        assert_arr_eq_i8(out, 100, m, "Offline 128x128 Test 1 Passed", "Offline 128x128 Test 1 Failed");
-    }
+    // up_proj(xq) --> s1 (hidden_dim, )
+    struct q4f32s_qi8f32s_egemv_params up_proj_params = {
+        up_proj->data,
+        up_proj->s,
+        up_proj->z,
+        xq->data, // (in)  dim
+        xq->s,
+        s1->data, // (out) hidden_dim
+        up_proj->m, // (out) hidden_dim
+        up_proj->n, // (in)  dim
+        tid,
+        n_threads,
+    };
+    q4f32s_qi8f32s_egemv_thread(&up_proj_params);
 
-    // 2 - non 1.0 input scale
-    {
-        BROADCAST(w, 0x55, m * n / 2);
-        BROADCAST(s, 1.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
+    // // gate_proj(xq) --> s2 (hidden_dim, )
+    // struct q4f32s_qi8f32s_egemv_params gate_proj_params = {
+    //     gate_proj->data,
+    //     gate_proj->s,
+    //     gate_proj->z,
+    //     xq->data,
+    //     xq->s,
+    //     s2->data,
+    //     gate_proj->m, // hidden_dim
+    //     gate_proj->n, // dim
+    //     tid,
+    //     n_threads,
+    // };
+    // q4f32s_qi8f32s_egemv_thread(&gate_proj_params);
 
-        float in_s[] = { 2.0f, 2.0f, 2.0f, 2.0f };
-        memset(out, 0, m);
-        float out_s = 81.92f;
+    pthread_barrier_wait(op_barrier);
 
-        q4f32s_qi8f32s_128x512_ukernel_offline(
-            w, n / 2,
-            s, z,
-            in, in_s,
-            out, out_s);
+    // Q(s2) --> xq (hidden_dim,)
+    struct f32_qi8f32s_params quant_s2_params = {
+        s2->data, // hidden_dim
+        xq->data, // hidden_dim
+        xq->s,
+        s2->n, // hiddem_dim
+        tid,
+        n_threads,
+    };
+    f32_qi8f32s_thread(&quant_s2_params); // problems
 
-        assert_arr_eq_i8(out, 100, m, "Offline 128x128 Test 2 Passed", "Offline 128x128 Test 2 Failed");
-    }
+    pthread_barrier_wait(op_barrier);
 
-    // 3 - weights and scales alternated along the input dimension
-    {
-        for (int row = 0; row < m; row++) { // row idx
-            for (int col = 0; col < n / 2; col++) { // col idx
-                if (col % 2 == 0) {
-                    w[row * n / 2 + col] = 0x33;
-                } else {
-                    w[row * n / 2 + col] = 0x55;
-                }
-            }
-        }
+    struct q4f32s_qi8f32s_egemv_params down_proj_params = {
+        down_proj->data,
+        down_proj->s,
+        down_proj->z,
+        xq->data, // (in) hidden_dim
+        xq->s,
+        y->data,
+        down_proj->m, // (in)  dim
+        down_proj->n, // (out) hidden_dim
+        tid,
+        n_threads,
+    };
+    q4f32s_qi8f32s_egemv_thread(&down_proj_params);
 
-        int n_col_qblocks = n / QBLOCK_SIZE;
-        int n_row_qblocks = m / QBLOCK_SIZE;
-        for (int row_block = 0; row_block < n_row_qblocks; row_block++) {
-            for (int col_block = 0; col_block < n_col_qblocks; col_block++) {
-                int block_id = row_block * n_row_qblocks + col_block;
-                for (int el = 0; el < QBLOCK_SIZE; el++) {
-                    s[block_id * QBLOCK_SIZE + el] = (col_block % 2 == 0) ? 1.0f : 2.0f;
-                }
-            }
-        }
+    pthread_barrier_wait(op_barrier);
 
-        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-        memset(out, 0, m);
-        float out_s = 46.08f;
-
-        q4f32s_qi8f32s_128x512_ukernel_offline(
-            w, n / 2,
-            s, z,
-            in, in_s,
-            out, out_s);
-
-        assert_arr_eq_i8(out, 100, m, "Offline 128x128 Test 3 Passed", "Offline 128x128 Test 3 Failed");
-    }
-
-    // 4 - Trivial - But with negative values after zero adjustment
-    {
-        memset(w, 0, m * n / 2);
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-        memset(out, 0, m);
-        float out_s = 81.96f;
-
-        q4f32s_qi8f32s_128x512_ukernel_offline(
-            w, n / 2,
-            s, z,
-            in, in_s,
-            out, out_s);
-
-        assert_arr_eq_i8(out, -100, m, "Offline 128x128 Test 4 Passed", "Offline 128x128 Test 4 Failed");
-    }
-
-    // 5 - Trivial - But the out_s is too small to put the outputs into int8 range
-    {
-        memset(w, 0, m * n / 2);
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-        memset(out, 0, m);
-        float out_s = 1.0f;
-
-        q4f32s_qi8f32s_128x512_ukernel_offline(
-            w, n / 2,
-            s, z,
-            in, in_s,
-            out, out_s);
-
-        assert_arr_eq_i8(out, -128, m, "Offline 128x128 Test 5 Passed", "Offline 128x128 Test 5 Failed");
-    }
-
-    // 6 - alternating weights along the output dimension
-    {
-        for (int row = 0; row < m; row++) { // row idx
-            for (int col = 0; col < n / 2; col++) { // col idx
-                w[row * n / 2 + col] = (row % 2 == 0) ? 0x33 : 0x55;
-            }
-        }
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-        memset(out, 0, m);
-        float out_s = 81.96f;
-
-        q4f32s_qi8f32s_128x512_ukernel_offline(
-            w, n / 2,
-            s, z,
-            in, in_s,
-            out, out_s);
-
-        bool passed = true;
-        for (int i = 0; i < m; i++) {
-            if (out[i] != (i % 2 == 0 ? 50 : 100)) {
-                std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
-                passed = false;
-            }
-        }
-
-        if (passed) {
-            cout << "Offline 128x128 Test 6 Passed" << endl;
-        } else {
-            cout << "Offline 128x128 Test 6 Failed" << endl;
-        }
-    }
-
-    // 7 - alternate zero values
-    {
-        BROADCAST(w, 0x11, m * n / 2);
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++) {
-            z[i] = (i % 2 == 0) ? 0x11 : 0x33;
-        }
-        BROADCAST(in, 2, n);
-        float in_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-        memset(out, 0, m);
-        float out_s = 40.96f;
-
-        q4f32s_qi8f32s_128x512_ukernel_offline(
-            w, n / 2,
-            s, z,
-            in, in_s,
-            out, out_s);
-
-        bool passed = true;
-        for (int i = 0; i < m; i += 4) {
-            if (out[i] != 0 || out[i + 1] != 0 || out[i + 2] != -100 || out[i + 3] != -100) {
-                cout << "Output[" << i << "] = " << (int)out[i] << endl;
-                cout << "Output[" << i + 1 << "] = " << (int)out[i + 1] << endl;
-                cout << "Output[" << i + 2 << "] = " << (int)out[i + 2] << endl;
-                cout << "Output[" << i + 3 << "] = " << (int)out[i + 3] << endl;
-                passed = false;
-            }
-        }
-
-        if (passed) {
-            std::cout << "Offline 128x128 Test 7 Passed" << std::endl;
-        } else {
-            std::cout << "Offline 128x128 Test 7 Failed" << std::endl;
-        }
-    }
-
-    _mm_free(w);
-    _mm_free(s);
-    _mm_free(z);
-    _mm_free(in);
-    _mm_free(out);
-    cout << endl;
+    return 0;
 }
-
-void test_offline_egemv()
-{
-    cout << "### q4f32s_qi8f32s_egemv_offline() ###" << endl;
-
-    int m = 512;
-    int n = 512;
-
-    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
-    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
-    int8_t* in = (int8_t*)_mm_malloc(n, 64);
-    float* in_scales = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
-    int8_t* out = (int8_t*)_mm_malloc(m, 64);
-    float* out_scales = (float*)_mm_malloc(m / QBLOCK_SIZE * sizeof(float), 64);
-
-    // 1 - Trivial
-    {
-        BROADCAST(w, 0x55, m * n / 2);
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
-        memset(out, 0, m);
-        BROADCAST(out_scales, 81.92f, m / QBLOCK_SIZE);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        assert_arr_eq_i8(out, 100, m, "Offline EGEMV Test 1 Passed", "Offline EGEMV Test 1 Failed");
-    }
-
-    // 2 - weight scales alternated along the input dimension
-    {
-        BROADCAST(w, 0x55, m * n / 2);
-        for (int row_block = 0; row_block < m / QBLOCK_SIZE; row_block++) {
-            for (int col_block = 0; col_block < n / QBLOCK_SIZE; col_block++) {
-                int block_id = row_block * n / QBLOCK_SIZE + col_block;
-                for (int el = 0; el < QBLOCK_SIZE; el++) {
-                    s[block_id * QBLOCK_SIZE + el] = (col_block % 2 == 0) ? 1.0f : 2.0f;
-                }
-            }
-        }
-        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
-        memset(out, 0, m);
-        BROADCAST(out_scales, 61.44f, m / QBLOCK_SIZE);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        assert_arr_eq_i8(out, 100, m, "Offline EGEMV Test 2 Passed", "Offline Egemv Test 2 Failed");
-    }
-
-    // 3 - trivial, but non 1.0 input scale
-    {
-        BROADCAST(w, 0x55, m * n / 2);
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        BROADCAST(in_scales, 2.0f, n / QBLOCK_SIZE);
-        memset(out, 0, m);
-        BROADCAST(out_scales, 163.84f, m / QBLOCK_SIZE);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        assert_arr_eq_i8(out, 100, m, "Offline EGEMV Test 3 Passed", "Offline EGEMV Test 3 Failed");
-    }
-
-    // 4 - trivial, but with negative values after 0 adjustment
-    {
-        BROADCAST(w, 0x00, m * n / 2);
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
-        memset(out, 0, m);
-        BROADCAST(out_scales, 81.92f, m / QBLOCK_SIZE);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        assert_arr_eq_i8(out, -100, m, "Offline EGEMV Test 4 Passed", "Offline EGEMV Test 4 Failed");
-    }
-
-    // 5 - trivial, but scale is too small to prevent int8 overflow
-    {
-        BROADCAST(w, 0x00, m * n / 2);
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x44, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
-        memset(out, 0, m);
-        BROADCAST(out_scales, 1.0f, m / QBLOCK_SIZE);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        assert_arr_eq_i8(out, -128, m, "Offline EGEMV Test 5 Passed", "Offline EGEMV Test 5 Failed");
-    }
-
-    // 6 - alternating weights along the output dimension
-    {
-        for (int row = 0; row < m; row++) { // row idx
-            for (int col = 0; col < n / 2; col++) { // col idx
-                w[row * n / 2 + col] = (row % 2 == 0) ? 0x33 : 0x55;
-            }
-        }
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(in, 2, n);
-        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
-        memset(out, 0, m);
-        BROADCAST(out_scales, 81.92f, m / QBLOCK_SIZE);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        bool passed = true;
-        for (int i = 0; i < m; i++) {
-            if (out[i] != (i % 2 == 0 ? 50 : 100)) { // this is not 50, becuase of rounding.
-                std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
-                passed = false;
-            }
-        }
-
-        if (passed) {
-            std::cout << "Offline EGEMV Test 6 Passed" << std::endl;
-        } else {
-            std::cout << "Offline EGEMV Test 6 Failed" << std::endl;
-        }
-    }
-
-    // 7 - alternating zeros along out dim
-    {
-        BROADCAST(w, 0x11, m * n / 2);
-        BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-        for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++) {
-            z[i] = (i % 2 == 0) ? 0x11 : 0x33;
-        }
-        BROADCAST(in, 2, n);
-        BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
-        memset(out, 0, m);
-        BROADCAST(out_scales, 40.96f, m / QBLOCK_SIZE);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        bool passed = true;
-        for (int i = 0; i < m; i += 4) {
-            if (out[i] != 0 || out[i + 1] != 0 || out[i + 2] != -100 || out[i + 3] != -100) {
-                std::cout << "Output[" << i << "] = " << (int)out[i] << std::endl;
-                std::cout << "Output[" << i + 1 << "] = " << (int)out[i + 1] << std::endl;
-                std::cout << "Output[" << i + 2 << "] = " << (int)out[i + 2] << std::endl;
-                std::cout << "Output[" << i + 3 << "] = " << (int)out[i + 3] << std::endl;
-                passed = false;
-            }
-        }
-
-        if (passed) {
-            std::cout << "Offline EGEMV Test 7 Passed" << std::endl;
-        } else {
-            std::cout << "Offline EGEMV Test 7 Failed" << std::endl;
-        }
-    }
-
-    _mm_free(w);
-    _mm_free(s);
-    _mm_free(z);
-    _mm_free(in);
-    _mm_free(in_scales);
-    _mm_free(out);
-    _mm_free(out_scales);
-    cout << endl;
-}
-
-void test_dim_fuzz()
-{
-    cout << "### Dimension Fuzzing ###" << endl;
-
-    uint8_t* w = (uint8_t*)_mm_malloc(32768 * 32768 / 2, 64);
-    float* s = (float*)_mm_malloc(32768 * 32768 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)_mm_malloc(32768 * 32768 / QBLOCK_SIZE / 2, 64);
-    int8_t* in = (int8_t*)_mm_malloc(32768, 64);
-    float* in_scales = (float*)_mm_malloc(32768 / QBLOCK_SIZE * sizeof(float), 64);
-    int8_t* out = (int8_t*)_mm_malloc(32768, 64);
-    float* out_scales = (float*)_mm_malloc(32768 / QBLOCK_SIZE * sizeof(float), 64);
-
-    for (int m = 512; m <= 32768; m += 512) {
-        for (int n = 512; n <= 32768; n += 512) {
-
-            // 1 - Trivial
-            {
-                BROADCAST(w, 0x55, m * n / 2);
-                BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
-                BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
-                BROADCAST(in, 2, n);
-                BROADCAST(in_scales, 1.0f, n / QBLOCK_SIZE);
-                memset(out, 0, m);
-                float _os = (float)(n * 2 * 2 * 4) / 100.0f;
-                BROADCAST(out_scales, _os, m / QBLOCK_SIZE);
-
-                q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-                int expected = round((float)8192 / _os) * (n / 512);
-                if (expected > 127) {
-                    expected = 127;
-                }
-
-                bool passed = true;
-                for (int i = 0; i < m; i++) {
-                    if (out[i] != expected) {
-                        cout << "Output[" << i << "] = " << (int)out[i] << endl;
-                        passed = false;
-                    }
-                }
-                if (!passed) {
-                    cout << "Fuzz Test 1 Failed for dim: " << m << ", " << n << endl;
-                    cout << "Output scale: " << _os << endl;
-                    cout << "Expected: " << expected << endl;
-                    exit(0);
-                }
-            }
-            cout << "Fuzz Test 1 Passed for dim: " << m << ", ?" << endl;
-        }
-    }
-
-    _mm_free(w);
-    _mm_free(s);
-    _mm_free(z);
-    _mm_free(in);
-    _mm_free(in_scales);
-    _mm_free(out);
-    _mm_free(out_scales);
-}
-
-void random_init_array(char* arr, int len)
-{
-    for (int i = 0; i < len; i++) {
-        arr[i] = rand() % 256;
-    }
-}
-
-void bench_llama_up_proj()
-{
-    cout << "Benchmarking LLAMA Up Proj ..." << endl;
-    cout << "Hidden Dim: 14336, Dim: 4096" << endl;
-    cout << endl;
-
-    int m = 14336;
-    int n = 4096;
-
-    uint8_t* w = (uint8_t*)_mm_malloc(m * n / 2, 64);
-    float* s = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
-    int8_t* in = (int8_t*)_mm_malloc(n, 64);
-    float* input_scales = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
-    int8_t* out = (int8_t*)_mm_malloc(m, 64);
-    float* output_scales = (float*)_mm_malloc(m / QBLOCK_SIZE * sizeof(float), 64);
-    random_init_array((char*)w, m * n / 2);
-    random_init_array((char*)s, m * n / QBLOCK_SIZE * sizeof(float));
-    random_init_array((char*)z, m * n / QBLOCK_SIZE / 2);
-    random_init_array((char*)in, n);
-    random_init_array((char*)input_scales, n / QBLOCK_SIZE * sizeof(float));
-
-    const int NIT = 200;
-    auto start = chrono::high_resolution_clock::now();
-    for (int i = 0; i < NIT; i++) {
-        q4f32s_qi8f32s_egemv_offline(
-            w, s, z,
-            in, input_scales,
-            out, output_scales,
-            m, n);
-    }
-    auto end = chrono::high_resolution_clock::now();
-
-    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-    cout << "total: " << sec << " (s)" << endl;
-    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
-
-    uint64_t flops_processed = 4096 * 14336 * 2 * (uint64_t)NIT;
-    double flops_per_sec = flops_processed / sec;
-    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
-    cout << endl;
-
-    _mm_free(w);
-    _mm_free(s);
-    _mm_free(z);
-    _mm_free(in);
-    _mm_free(input_scales);
-    _mm_free(out);
-    _mm_free(output_scales);
-}
-
-void bench_llama_ffn()
-{
-    // down proj 4096x14336
-    // gate_proj 14336x4096
-    // up_proj 14336x4096
-    // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
-    // we do not do the elementwise multiply
-    // we do not apply SwiGLU non-linearity in the hidden_dim
-    // just the matmuls. skips 14k ops out of 176M total (4096 * 14336 * 3)
-    cout << "Benchmarking LLAMA FFN ..." << endl;
-    cout << "down_proj @ (up_proj @ x * gate_proj @ x)" << endl;
-    cout << "Hidden Dim: 14436, Dim: 4096" << endl;
-    cout << endl;
-
-    // ==== activations ====
-    int8_t* io = (int8_t*)_mm_malloc(4096, 64);
-    float* input_scales = (float*)_mm_malloc(4096 / QBLOCK_SIZE * sizeof(float), 64);
-    float* output_scales = (float*)_mm_malloc(4096 / QBLOCK_SIZE * sizeof(float), 64);
-    random_init_array((char*)io, 4096);
-    random_init_array((char*)input_scales, 4096 / QBLOCK_SIZE);
-    random_init_array((char*)output_scales, 4096 / QBLOCK_SIZE);
-
-    // ==== up_proj ====
-    uint8_t* w_up_proj = (uint8_t*)_mm_malloc(14336 * 4096 / 2, 64);
-    float* s_up_proj = (float*)_mm_malloc(14336 * 4096 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z_up_proj = (uint8_t*)_mm_malloc(14336 * 4096 / QBLOCK_SIZE / 2, 64);
-    int8_t* out_up_proj = (int8_t*)_mm_malloc(14336, 64);
-    float* out_scales_up_proj = (float*)_mm_malloc(14336 / QBLOCK_SIZE * sizeof(float), 64);
-    random_init_array((char*)w_up_proj, 14336 * 4096 / 2);
-    random_init_array((char*)s_up_proj, 14336 * 4096 / QBLOCK_SIZE);
-    random_init_array((char*)z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
-    random_init_array((char*)out_up_proj, 14336);
-    random_init_array((char*)out_scales_up_proj, 14336 / QBLOCK_SIZE);
-
-    // ==== gate_proj ====
-    uint8_t* w_gate_proj = (uint8_t*)_mm_malloc(4096 * 14336 / 2, 64);
-    float* s_gate_proj = (float*)_mm_malloc(4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z_gate_proj = (uint8_t*)_mm_malloc(4096 * 14336 / QBLOCK_SIZE / 2, 64);
-    int8_t* out_gate_proj = (int8_t*)_mm_malloc(14336, 64);
-    float* out_scales_gate_proj = (float*)_mm_malloc(14336 / QBLOCK_SIZE * sizeof(float), 64);
-    random_init_array((char*)w_gate_proj, 4096 * 14336 / 2);
-    random_init_array((char*)s_gate_proj, 4096 * 14336 / QBLOCK_SIZE);
-    random_init_array((char*)z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-    random_init_array((char*)out_gate_proj, 14336);
-    random_init_array((char*)out_scales_gate_proj, 14336 / QBLOCK_SIZE);
-
-    // ==== down_proj ====
-    uint8_t* w_down_proj = (uint8_t*)_mm_malloc(4096 * 14336 / 2, 64);
-    float* s_down_proj = (float*)_mm_malloc(4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z_down_proj = (uint8_t*)_mm_malloc(4096 * 14336 / QBLOCK_SIZE / 2, 64);
-    random_init_array((char*)w_down_proj, 4096 * 14336 / 2);
-    random_init_array((char*)s_down_proj, 4096 * 14336 / QBLOCK_SIZE);
-    random_init_array((char*)z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-
-    // ==== bench ====
-    const int NIT = 200;
-    auto start = chrono::high_resolution_clock::now();
-    for (int i = 0; i < NIT; i++) {
-        // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
-        // up_proj @ x
-        q4f32s_qi8f32s_egemv_offline(
-            w_up_proj, s_up_proj, z_up_proj,
-            io, input_scales,
-            out_up_proj, out_scales_up_proj,
-            14336, 4096);
-
-        // gate_proj @ x
-        q4f32s_qi8f32s_egemv_offline(
-            w_gate_proj, s_gate_proj, z_gate_proj,
-            io, input_scales,
-            out_gate_proj, out_scales_gate_proj,
-            14336, 4096);
-
-        // down_proj @ up_proj_out
-        q4f32s_qi8f32s_egemv_offline(
-            w_down_proj, s_down_proj, z_down_proj,
-            out_up_proj, out_scales_up_proj,
-            io, output_scales,
-            4096, 14336);
-    }
-    auto end = chrono::high_resolution_clock::now();
-
-    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-    cout << "total: " << sec << " (s)" << endl;
-    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
-
-    uint64_t flops_processed = 4096 * 14336 * 6 * (uint64_t)NIT;
-    double flops_per_sec = flops_processed / sec;
-    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
-    cout << endl;
-
-    // ==== cleanup ====
-    _mm_free(io);
-    _mm_free(input_scales);
-    _mm_free(w_up_proj);
-    _mm_free(s_up_proj);
-    _mm_free(z_up_proj);
-    _mm_free(out_up_proj);
-    _mm_free(out_scales_up_proj);
-    _mm_free(w_gate_proj);
-    _mm_free(s_gate_proj);
-    _mm_free(z_gate_proj);
-    _mm_free(out_gate_proj);
-    _mm_free(out_scales_gate_proj);
-    _mm_free(w_down_proj);
-    _mm_free(s_down_proj);
-    _mm_free(z_down_proj);
-}
-
-int main(int argc, char** argv)
-{
-    test_128x512_offline();
-    test_offline_egemv();
-
-    if (argc == 2) {
-        if (string(argv[1]) == "fuzz") {
-            cout << "Fuzzing tests across all supported input dimensions ..." << endl;
-            cout << "This will take a long time" << endl;
-            test_dim_fuzz();
-        }
-    } else {
-        cout << "Skipping Fuzz. run `./cpu.exe fuzz` to fuzz" << endl;
-    }
-    cout << endl;
-
-    bench_llama_up_proj();
-    bench_llama_ffn();
-}
-
-from q4f32s_qi8f32s_thread
-    // int in_qblocks = n / QBLOCK_SIZE;
-    // for (int col = 0; col < n; col += 512) {
-    //     int in_qblock = col / QBLOCK_SIZE;
-    //     for (int row = start_row; row < end_row; row += 128) {
-    //         int out_qblock = row / QBLOCK_SIZE;
-    //         int block_id = out_qblock * in_qblocks + in_qblock;
-
-    //         q4f32s_qi8f32s_128x512_ukernel(
-    //             w + (row * n + col) / 2, n,
-    //             s + block_id * QBLOCK_SIZE,
-    //             z + block_id * QBLOCK_SIZE / 2,
-    //             in + col, in_s + col / QBLOCK_SIZE,
-    //             out + row);
-    //     }
-    // }
-void q4f32s_qi8f32s_128x512_ukernel(
-    uint8_t* __restrict w,
-    uint64_t w_rs,
-    float* __restrict scales,
-    uint8_t* __restrict zeros,
-    int8_t* __restrict in,
-    float* __restrict in_scales,
-    float* __restrict out)
-{
-    for (int row = 0; row < 128; row++) {
-        float acc = 0;
-
-        for (int qblock = 0; qblock < 4; qblock++) {
-            // Initialize accumulator
-            __m512i acci = _mm512_setzero_si512();
-
-            // Load Zero
-            uint8_t _zero = zeros[(qblock * QBLOCK_SIZE + row) / 2];
-            _zero >>= (!(row & 1) << 2); // 4 if row is even, 0 otherwise
-            _zero &= 0x0F;
-            __m512i zero = _mm512_set1_epi8(_zero);
-
-            {
-                // load input 64 values
-                __m512i input = _mm512_loadu_epi8(in + qblock * QBLOCK_SIZE);
-                __m512i negative_input = _mm512_subs_epi8(_mm512_setzero_si512(), input);
-
-                // load weights 64 values
-                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE + row * w_rs) / 2);
-
-                // AVX512_VNNI likes u8 * i8 multiplications
-                // input(i8) * (weights(u8) - zeros(u8)) == weights(u8)*input(i8) + zeros(u8)*(-input(i8))
-                // Signed muliplications are possible, but only with 256-bit regs ^_^
-                // - overflow safety
-                // - highest weight value is 15, highest abs input is 128. at most 1920
-                // - we can safely accumulate ~1M values onto i32, well within dimensions limits
-                // we cannot negate -128, however. This will saturate to 127, not 128.
-                acci = _mm512_dpbusd_epi32(acci, weight, input);
-                acci = _mm512_dpbusd_epi32(acci, zero, negative_input);
-            }
-
-            {
-                __m512i input = _mm512_loadu_epi8(in + qblock * QBLOCK_SIZE + 64);
-                __m512i negative_input = _mm512_subs_epi8(_mm512_setzero_si512(), input);
-                __m512i weight = load_weights(w + (qblock * QBLOCK_SIZE + 64 + row * w_rs) / 2);
-                acci = _mm512_dpbusd_epi32(acci, weight, input);
-                acci = _mm512_dpbusd_epi32(acci, zero, negative_input);
-            }
-
-            acc += _mm512_reduce_add_epi32(acci) * scales[qblock * QBLOCK_SIZE + row] * in_scales[qblock];
-        }
-
-        out[row] += acc;
-    }
-}*/

@@ -94,6 +94,10 @@ pub fn build(b: *std.Build) void {
         exe.linkLibC();
         exe.linkLibCpp();
         exe.addIncludePath(argparse.path("include"));
+        if (target.result.os.tag == .windows) {
+            exe.addLibraryPath(.{ .path = "C:/Program Files (x86)/ggml/lib" });
+            exe.addIncludePath(.{ .path = "C:/Program Files (x86)/ggml/include" });
+        }
         exe.linkSystemLibrary("ggml");
         b.installArtifact(exe);
 
@@ -101,6 +105,40 @@ pub fn build(b: *std.Build) void {
         run_cmd.step.dependOn(b.getInstallStep());
         if (b.args) |args| run_cmd.addArgs(args);
         const run_step = b.step("bench_ggml", "Benchmark GGML");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    // ===== bench cpu =====
+    {
+        const exe = b.addExecutable(.{
+            .name = "bench_cpu",
+            .target = target,
+            .optimize = .ReleaseFast,
+        });
+        exe.addCSourceFiles(.{ .root = .{
+            .path = ".",
+        }, .files = &.{
+            "src/cpu.cpp",
+            "src/thread.cpp",
+            "bench/cpu.cpp",
+        }, .flags = &.{
+            "-std=c++17",
+            "-mavx512f",
+            "-O3",
+        } });
+        exe.addIncludePath(.{ .path = "include" });
+        exe.addIncludePath(argparse.path("include"));
+        exe.linkLibC();
+        exe.linkLibCpp();
+        if (target.result.os.tag == .linux) {
+            exe.linkSystemLibrary("pthread");
+        }
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        const run_step = b.step("bench_cpu", "Benchmark CPU");
         run_step.dependOn(&run_cmd.step);
     }
 }

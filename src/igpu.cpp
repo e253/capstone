@@ -24,7 +24,7 @@ using namespace std;
 
 static cl_context context;
 static cl_kernel vec_add_kernel;
-static cl_kernel q4f32s_qi8f32s_offline_v1_kernel;
+static cl_kernel q4f32s_qi8f32s_egemv_kernel;
 static cl_kernel f32_qi8f32s_kernel;
 static cl_command_queue queue;
 
@@ -42,11 +42,11 @@ const string cl_src = CL_SRC(
         return (char)(x > 127.0f ? 127 : (x < -128.0f ? -128 : round(x)));
     }
 
-    inline char get0(uchar w) {
+    char get0(uchar w) {
         return (char)((w >> 4) & 0x0F);
     }
 
-    inline char get1(uchar w) {
+    char get1(uchar w) {
         return (char)(w & 0x0F);
     }
 
@@ -81,14 +81,13 @@ const string cl_src = CL_SRC(
         }
     }
 
-    __kernel void q4f32s_qi8f32s_offline_v1(
+    __kernel void q4f32s_qi8f32s_egemv_kernel(
         __global uchar4* restrict w,
         __global float* restrict s,
         __global uchar* restrict z,
         __global char8* restrict in,
         __global float* restrict in_scales,
-        __global char* restrict out,
-        __global float* restrict out_scales,
+        __global float* restrict out,
         int m, int n, int n_blocks_per_thread) {
         const int QBLOCK_SIZE = 128;
         const int row_sz2_block = get_local_id(1);
@@ -122,9 +121,9 @@ const string cl_src = CL_SRC(
                 _acc1 = mad(convert_float(get0(weights1.s0) - zero1), convert_float(input.s0), _acc1);
                 _acc1 = mad(convert_float(get1(weights1.s0) - zero1), convert_float(input.s1), _acc1);
                 _acc1 = mad(convert_float(get0(weights1.s1) - zero1), convert_float(input.s2), _acc1);
-                _acc1 = mad(convert_float(get1(weights1.s2) - zero1), convert_float(input.s3), _acc1);
+                _acc1 = mad(convert_float(get1(weights1.s1) - zero1), convert_float(input.s3), _acc1);
                 _acc1 = mad(convert_float(get0(weights1.s2) - zero1), convert_float(input.s4), _acc1);
-                _acc1 = mad(convert_float(get1(weights1.s3) - zero1), convert_float(input.s5), _acc1);
+                _acc1 = mad(convert_float(get1(weights1.s2) - zero1), convert_float(input.s5), _acc1);
                 _acc1 = mad(convert_float(get0(weights1.s3) - zero1), convert_float(input.s6), _acc1);
                 _acc1 = mad(convert_float(get1(weights1.s3) - zero1), convert_float(input.s7), _acc1);
 
@@ -143,8 +142,8 @@ const string cl_src = CL_SRC(
                 _acc2 = mad(convert_float(get1(weights2.s3) - zero2), convert_float(input.s7), _acc2);
             } // block process
 
-            acc1 += (float)_acc1 * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2] * in_scales[in_qblock]; // check s
-            acc2 += (float)_acc2 * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2 + 1] * in_scales[in_qblock]; // check s
+            acc1 += (float)_acc1 * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2] * in_scales[in_qblock];
+            acc2 += (float)_acc2 * s[QBLOCK_ID * QBLOCK_SIZE + row_sz2_block * 2 + 1] * in_scales[in_qblock];
         } // qblock
 
         __local float acc1_local[2][64];
@@ -157,8 +156,8 @@ const string cl_src = CL_SRC(
         if (get_local_id(0) == 0) {
             acc1 = acc1_local[0][row_sz2_block] + acc1_local[1][row_sz2_block];
             acc2 = acc2_local[0][row_sz2_block] + acc2_local[1][row_sz2_block];
-            out[out_qblock * 128 + row_sz2_block * 2] = acc1; // check out_scales
-            out[out_qblock * 128 + row_sz2_block * 2 + 1] = acc2; // check out_scales
+            out[out_qblock * 128 + row_sz2_block * 2] = acc1;
+            out[out_qblock * 128 + row_sz2_block * 2 + 1] = acc2;
         }
     });
 
@@ -206,41 +205,39 @@ void f32_qi8f32s(float* in, int8_t* out, float* out_s, int n, int n_threads)
 }
 
 // DO NOT CALL FROM MULTIPLE THREADS!
-void q4f32s_qi8f32s_egemv_offline(
+void q4f32s_qi8f32s_egemv(
     uint8_t* w,
     float* s,
     uint8_t* z,
     int8_t* in,
-    float* in_scales,
-    int8_t* out,
-    float* out_scales,
-    int m, int n)
+    float* in_s,
+    float* out,
+    int m, int n,
+    int n_threads)
 {
     assert(m >= 512 && n >= 512 && "m and n must be at least 128");
     assert(m <= 32768 && n <= 32768 && "m and n can be at most 16384");
     assert(m % 512 == 0 && n % 512 == 0 && "m and n must be multiples of 128");
 
     cl_int clStatus;
-    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 0, w);
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_egemv_kernel, 0, w);
     CL_CHECK(clStatus, "clSetKernelArgSVMPointer - w")
-    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 1, s);
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_egemv_kernel, 1, s);
     CL_CHECK(clStatus, "clSetKernelArgSVMPointer - s")
-    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 2, z);
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_egemv_kernel, 2, z);
     CL_CHECK(clStatus, "clSetKernelArgSVMPointer - z")
-    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 3, in);
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_egemv_kernel, 3, in);
     CL_CHECK(clStatus, "clSetKernelArgSVMPointer - in")
-    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 4, in_scales);
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_egemv_kernel, 4, in_s);
     CL_CHECK(clStatus, "clSetKernelArgSVMPointer - in_scales")
-    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 5, out);
+    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_egemv_kernel, 5, out);
     CL_CHECK(clStatus, "clSetKernelArgSVMPointer - out")
-    clStatus = clSetKernelArgSVMPointer(q4f32s_qi8f32s_offline_v1_kernel, 6, out_scales);
-    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - out_scales")
-    clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 7, sizeof(int), &m);
+    clStatus = clSetKernelArg(q4f32s_qi8f32s_egemv_kernel, 6, sizeof(int), &m);
     CL_CHECK(clStatus, "clSetKernelArg - m")
-    clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 8, sizeof(int), &n);
+    clStatus = clSetKernelArg(q4f32s_qi8f32s_egemv_kernel, 7, sizeof(int), &n);
     CL_CHECK(clStatus, "clSetKernelArg - n")
     int n_blocks_per_thread = n / 2 / 128;
-    clStatus = clSetKernelArg(q4f32s_qi8f32s_offline_v1_kernel, 9, sizeof(int), &n_blocks_per_thread);
+    clStatus = clSetKernelArg(q4f32s_qi8f32s_egemv_kernel, 8, sizeof(int), &n_blocks_per_thread);
     CL_CHECK(clStatus, "clSetKernelArg - n_blocks_per_thread")
 
     cl_event event;
@@ -256,19 +253,19 @@ void q4f32s_qi8f32s_egemv_offline(
     // each row is split in two halfs
     // each out_block is split into 64 threads doing 2 rows each.
     clStatus = clEnqueueNDRangeKernel(
-        queue, q4f32s_qi8f32s_offline_v1_kernel,
+        queue, q4f32s_qi8f32s_egemv_kernel,
         3, nullptr,
         global_work_size, local_work_size,
         0, nullptr, &event);
-    CL_CHECK(clStatus, "q4f32s_qi8f32s_offline_v1_kernel invocation")
+    CL_CHECK(clStatus, "q4f32s_qi8f32s_egemv_kernel invocation")
 
     clStatus = clWaitForEvents(1, &event);
-    CL_CHECK(clStatus, "clWaitForEvents - q4f32s_qi8f32s_offline_v1_kernel")
+    CL_CHECK(clStatus, "clWaitForEvents - q4f32s_qi8f32s_egemv_kernel")
     clStatus = clReleaseEvent(event);
-    CL_CHECK(clStatus, "clReleaseEvent - q4f32s_qi8f32s_offline_v1_kernel")
+    CL_CHECK(clStatus, "clReleaseEvent - q4f32s_qi8f32s_egemv_kernel")
 
     clStatus = clFinish(queue);
-    CL_CHECK(clStatus, "clFinish - q4f32s_qi8f32s_offline_v1_kernel")
+    CL_CHECK(clStatus, "clFinish - q4f32s_qi8f32s_egemv_kernel")
 }
 
 /*
@@ -295,6 +292,38 @@ void q4f32s_qi8f32s_egemv_offline(
     clSVMFree(context, in);      \
     clSVMFree(context, out);     \
     clSVMFree(context, out_s)
+
+#define SETUP_TENSORS(m, n)                                                                             \
+    uint8_t* w = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / 2, 64);                       \
+    float* s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE * sizeof(float), 64); \
+    uint8_t* z = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE / 2, 64);         \
+    int8_t* in = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, n, 64);                                \
+    float* in_s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, n / QBLOCK_SIZE * sizeof(float), 64);  \
+    float* out = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * sizeof(float), 64)
+
+#define MAP_TENSORS()                                     \
+    SVMMAP(queue, w, m* n / 2);                           \
+    SVMMAP(queue, s, m* n / QBLOCK_SIZE * sizeof(float)); \
+    SVMMAP(queue, z, m* n / QBLOCK_SIZE / 2);             \
+    SVMMAP(queue, in, n);                                 \
+    SVMMAP(queue, in_s, n / QBLOCK_SIZE * sizeof(float)); \
+    SVMMAP(queue, out, m * sizeof(float))
+
+#define UNMAP_TENSORS()    \
+    SVMUNMAP(queue, w);    \
+    SVMUNMAP(queue, s);    \
+    SVMUNMAP(queue, z);    \
+    SVMUNMAP(queue, in);   \
+    SVMUNMAP(queue, in_s); \
+    SVMUNMAP(queue, out)
+
+#define TEARDOWN_TENSORS()    \
+    clSVMFree(context, w);    \
+    clSVMFree(context, s);    \
+    clSVMFree(context, z);    \
+    clSVMFree(context, in);   \
+    clSVMFree(context, in_s); \
+    clSVMFree(context, out)
 
 #define BROADCAST(ptr, v, len)      \
     for (int i = 0; i < (len); i++) \
@@ -333,6 +362,18 @@ void ASSERT_ARRAY_EQ(T expected, T* actual, int n)
     if (failed) {
         cout << "Number of different elements: " << n_different << ", " << (float)n_different / (float)n * 100 << "%" << endl;
         FAIL();
+    }
+}
+
+void shuffle_bytes(uint8_t* bytes, int len)
+{
+    for (int it = 0; it < 10; it++) {
+        for (int i = 0; i < len; i++) {
+            int j = rand() % len;
+            uint8_t tmp = bytes[i];
+            bytes[i] = bytes[j];
+            bytes[j] = tmp;
+        }
     }
 }
 
@@ -565,6 +606,328 @@ TEST_P(QuantReferenceFuzz, Fuzz)
 INSTANTIATE_TEST_SUITE_P(, QuantContrived, testing::Values(512, 1024, 2048, 2560, 4096, 10240, 14336));
 INSTANTIATE_TEST_SUITE_P(, QuantReferenceFuzz, testing::Values(512, 1024, 2048, 2560, 4096, 10240, 14336));
 
+class EGEMVContrived : public testing::TestWithParam<tuple<int, int>> { };
+TEST_P(EGEMVContrived, Trivial)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+
+    MAP_TENSORS();
+
+    BROADCAST(w, 0x55, m * n / 2);
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    BROADCAST(in, 2, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+
+    UNMAP_TENSORS();
+
+    int n_threads = 4;
+    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+
+    MAP_TENSORS();
+    // make sure inputs are not touched.
+    // shouldn't vary between tests
+    ASSERT_ARRAY_EQ((uint8_t)0x55, w, n);
+    ASSERT_ARRAY_EQ(2.0f, s, m * n / QBLOCK_SIZE);
+    ASSERT_ARRAY_EQ((uint8_t)0x11, z, m * n / QBLOCK_SIZE / 2);
+    ASSERT_ARRAY_EQ((int8_t)2, in, n);
+    ASSERT_ARRAY_EQ(1.0f, in_s, n / QBLOCK_SIZE);
+
+    ASSERT_ARRAY_EQ(8192.0f * (n / 512), out, m);
+
+    TEARDOWN_TENSORS();
+}
+
+TEST_P(EGEMVContrived, Alternated_Weight_Scales_Along_Input)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+
+    MAP_TENSORS();
+
+    BROADCAST(w, 0x55, m * n / 2);
+    for (int row_block = 0; row_block < m / QBLOCK_SIZE; row_block++) {
+        for (int col_block = 0; col_block < n / QBLOCK_SIZE; col_block++) {
+            int block_id = row_block * n / QBLOCK_SIZE + col_block;
+            BROADCAST(&s[block_id * QBLOCK_SIZE], col_block % 2 == 0 ? 1.0f : 2.0f, QBLOCK_SIZE);
+        }
+    }
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    BROADCAST(in, 2, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+
+    UNMAP_TENSORS();
+
+    int n_threads = 4;
+    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+
+    MAP_TENSORS();
+
+    ASSERT_ARRAY_EQ(6144.0f * (n / 512), out, m);
+
+    TEARDOWN_TENSORS();
+}
+
+TEST_P(EGEMVContrived, Unique_Input_Scales)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+
+    MAP_TENSORS();
+
+    BROADCAST(w, 0x55, m * n / 2);
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    BROADCAST(in, 2, n);
+    for (int i = 0; i < n / QBLOCK_SIZE; i++)
+        in_s[i] = (float)(i + 1);
+    BROADCAST(out, 0.0f, m);
+
+    UNMAP_TENSORS();
+
+    int n_threads = 4;
+    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+
+    vector<float> expected(n, 16.0f);
+    for (int i = 0; i < n / QBLOCK_SIZE; i++)
+        for (int j = i * QBLOCK_SIZE; j < (i + 1) * QBLOCK_SIZE; j++)
+            expected.data()[j] *= (i + 1);
+    // https://en.cppreference.com/w/cpp/algorithm/for_each
+    struct Sum {
+        void operator()(float a) { sum += a; }
+        float sum { 0 };
+    };
+    Sum sum = for_each(expected.begin(), expected.end(), Sum());
+
+    MAP_TENSORS();
+
+    ASSERT_ARRAY_EQ(sum.sum, out, m);
+
+    TEARDOWN_TENSORS();
+}
+
+TEST_P(EGEMVContrived, Unique_Weights)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+    MAP_TENSORS();
+
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    BROADCAST(in, 2, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+
+    UNMAP_TENSORS();
+
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            if (j % 2 == 0) {
+                w[(i * n + j) / 2] &= 0x0F; // dump upper 4 bits
+                w[(i * n + j) / 2] |= (((j % 16) << 4) & 0xF0); // set upper 4 bits
+            } else {
+                w[(i * n + j) / 2] &= 0xF0; // dump lower 4 bits
+                w[(i * n + j) / 2] |= ((j % 16) & 0x0F); // set lower 4 bits
+            }
+        }
+
+        shuffle_bytes(&w[i * n / 2], n / 2);
+    }
+
+    int n_threads = 4;
+    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+
+    MAP_TENSORS();
+    ASSERT_ARRAY_EQ(13312.0f * (n / 512), out, m);
+
+    TEARDOWN_TENSORS();
+}
+
+TEST_P(EGEMVContrived, Random_Zeros)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+
+    MAP_TENSORS();
+
+    BROADCAST(w, 0x55, m * n / 2);
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++) {
+        z[i] = rand() % 256;
+    }
+    BROADCAST(in, 2, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+
+    UNMAP_TENSORS();
+
+    int n_threads = 4;
+    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+
+    float* expected = (float*)_mm_malloc(m * sizeof(float), 64);
+    BROADCAST(expected, 0.0f, m);
+    for (int row = 0; row < m; row++) {
+        for (int col = 0; col < n; col += QBLOCK_SIZE) {
+            int block_id = row / QBLOCK_SIZE * n / QBLOCK_SIZE + col / QBLOCK_SIZE;
+            int logical_offset = block_id * QBLOCK_SIZE + row % QBLOCK_SIZE;
+
+            uint8_t zero = row % 2 == 0 ? (z[logical_offset / 2] >> 4) & 0x0F : z[logical_offset / 2] & 0x0F;
+
+            expected[row] += (5 - zero) * 4 * 128;
+        }
+    }
+
+    MAP_TENSORS();
+
+    ASSERT_ARRAY_EQ(expected, out, m);
+
+    TEARDOWN_TENSORS();
+}
+
+TEST_P(EGEMVContrived, Shuffled_Inputs)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+    MAP_TENSORS();
+
+    BROADCAST(w, 0x55, m * n / 2);
+    BROADCAST(s, 2.0f, m * n / QBLOCK_SIZE);
+    BROADCAST(z, 0x11, m * n / QBLOCK_SIZE / 2);
+    for (int i = 0; i < n / 2; i++) {
+        in[i] = i % 128;
+    }
+    for (int i = n / 2; i < n; i++)
+        in[i] = -(i % 128);
+    shuffle_bytes((uint8_t*)in, n);
+    BROADCAST(in_s, 1.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0.0f, m);
+
+    UNMAP_TENSORS();
+    int n_threads = 4;
+    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+
+    MAP_TENSORS();
+    ASSERT_ARRAY_EQ(0.0f, out, m);
+
+    TEARDOWN_TENSORS();
+}
+
+class EGEMVReferenceFuzz : public testing::TestWithParam<tuple<int, int>> { };
+TEST_P(EGEMVReferenceFuzz, Fuzz)
+{
+    tuple<int, int> t = GetParam();
+    int m = get<0>(t);
+    int n = get<1>(t);
+
+    SETUP_TENSORS(m, n);
+    uint8_t* w_ref = (uint8_t*)_mm_malloc(m * n / 2, 64);
+    float* s_ref = (float*)_mm_malloc(m * n / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_ref = (uint8_t*)_mm_malloc(m * n / QBLOCK_SIZE / 2, 64);
+    int8_t* in_ref = (int8_t*)_mm_malloc(n, 64);
+    float* in_s_ref = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
+    float* out_ref = (float*)_mm_malloc(m * sizeof(float), 64);
+
+    MAP_TENSORS();
+
+    // ranges are large enough to produce random looking values,
+    // but not so large that float error ruins equality checks.
+    for (int i = 0; i < m * n / 2; i++) {
+        w[i] = (uint8_t)(rand() % 256);
+        w_ref[i] = w[i];
+    }
+    for (int i = 0; i < m * n / QBLOCK_SIZE; i++) {
+        s[i] = (float)(rand() % 48);
+        s_ref[i] = s[i];
+    }
+    for (int i = 0; i < m * n / QBLOCK_SIZE / 2; i++) {
+        z[i] = (uint8_t)(rand() % 256);
+        z_ref[i] = z[i];
+    }
+    for (int i = 0; i < n; i++) {
+        in[i] = (int8_t)(rand() % 24 - 12);
+        in_ref[i] = in[i];
+    }
+    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+        in_s[i] = (float)(rand() % 32);
+        in_s_ref[i] = in_s[i];
+    }
+
+    BROADCAST(out, 0.0f, m);
+    BROADCAST(out_ref, 0.0f, m);
+
+    UNMAP_TENSORS();
+    int n_threads = 4;
+    q4f32s_qi8f32s_egemv(w, s, z, in, in_s, out, m, n, n_threads);
+    ref_q4f32s_qi8f32s_egemv(w_ref, s_ref, z_ref, in_ref, in_s_ref, out_ref, m, n);
+
+    MAP_TENSORS();
+    bool failed = false;
+    int n_different = 0;
+    for (int i = 0; i < m; i++) {
+        if (out[i] != out_ref[i]) {
+            cout << "ref[" << i << "] = " << out_ref[i] << ", opt[" << i << "] = " << out[i] << "; diff: " << (abs(out_ref[i] - out[i])) << endl;
+            failed = true;
+            n_different++;
+        }
+    }
+    if (failed) {
+        cout << "Number of different elements: " << n_different << "/" << m << ", " << (float)n_different / (float)m * 100 << "%" << endl;
+        FAIL();
+    }
+
+    TEARDOWN_TENSORS();
+    _mm_free(w_ref);
+    _mm_free(s_ref);
+    _mm_free(z_ref);
+    _mm_free(in_ref);
+    _mm_free(in_s_ref);
+    _mm_free(out_ref);
+}
+
+constexpr tuple<int, int> dims[] = {
+    { 512, 512 },
+    { 1024, 1024 },
+    { 512, 1024 },
+    { 512, 2048 },
+    { 512, 2560 },
+    { 512, 4096 },
+    { 512, 10240 },
+    { 512, 14336 },
+    { 1024, 2048 },
+    { 1024, 2560 },
+    { 1024, 4096 },
+    { 1024, 10240 },
+    { 1024, 14336 },
+    { 2048, 2560 },
+    { 2048, 4096 },
+    { 2048, 10240 },
+    { 4096, 14336 },
+    { 14336, 4096 },
+};
+INSTANTIATE_TEST_SUITE_P(, EGEMVContrived, testing::ValuesIn(dims));
+INSTANTIATE_TEST_SUITE_P(, EGEMVReferenceFuzz, testing::ValuesIn(dims));
+
 /*
     =============
        TESTING
@@ -620,8 +983,8 @@ int main(int argc, char** argv)
 
     vec_add_kernel = clCreateKernel(p, "vec_add", &clStatus);
     CL_CHECK(clStatus, "clCreateKernel - vec_add");
-    q4f32s_qi8f32s_offline_v1_kernel = clCreateKernel(p, "q4f32s_qi8f32s_offline_v1", &clStatus);
-    CL_CHECK(clStatus, "clCreateKernel - q4f32s_qi8f32s_offline_v1");
+    q4f32s_qi8f32s_egemv_kernel = clCreateKernel(p, "q4f32s_qi8f32s_egemv_kernel", &clStatus);
+    CL_CHECK(clStatus, "clCreateKernel - q4f32s_qi8f32s_egemv_kernel");
     f32_qi8f32s_kernel = clCreateKernel(p, "f32_qi8f32s", &clStatus);
     CL_CHECK(clStatus, "clCreateKernel - f32s_qi8f32s");
 
@@ -632,7 +995,7 @@ int main(int argc, char** argv)
 
     // cleanup
     clReleaseKernel(vec_add_kernel);
-    clReleaseKernel(q4f32s_qi8f32s_offline_v1_kernel);
+    clReleaseKernel(q4f32s_qi8f32s_egemv_kernel);
     clReleaseKernel(f32_qi8f32s_kernel);
     clReleaseCommandQueue(queue);
     clReleaseContext(context);

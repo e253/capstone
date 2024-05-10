@@ -1,3 +1,5 @@
+#include "capstone/capstone.hpp"
+#include "gtest/gtest.h"
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 #include <cassert>
@@ -6,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 using namespace std;
 
@@ -18,13 +21,11 @@ using namespace std;
     }
 #define SVMMAP(queue, svm_ptr, size) clEnqueueSVMMap(queue, CL_TRUE, CL_MEM_READ_WRITE, svm_ptr, size, 0, NULL, NULL)
 #define SVMUNMAP(queue, svm_ptr) clEnqueueSVMUnmap(queue, svm_ptr, 0, NULL, NULL)
-#define BROADCAST(ptr, len, v)    \
-    for (int i = 0; i < len; i++) \
-    ptr[i] = v
 
 static cl_context context;
 static cl_kernel vec_add_kernel;
 static cl_kernel q4f32s_qi8f32s_offline_v1_kernel;
+static cl_kernel f32_qi8f32s_kernel;
 static cl_command_queue queue;
 
 #define CL_SRC(...) #__VA_ARGS__
@@ -47,6 +48,37 @@ const string cl_src = CL_SRC(
 
     inline char get1(uchar w) {
         return (char)(w & 0x0F);
+    }
+
+    __kernel void f32_qi8f32s(
+        __global float* restrict in,
+        __global char* restrict out,
+        __global float* restrict out_s,
+        int n,
+        int n_el_per_thread) {
+        const int gid = get_global_id(0);
+        const int lid = get_local_id(0);
+
+        float max = fabs(in[gid * n_el_per_thread]);
+        for (int i = gid * n_el_per_thread; i < (gid + 1) * n_el_per_thread; i++)
+            max = fmax(fabs(max), fabs(in[i]));
+
+        max = work_group_reduce_max(max);
+
+        __local float _scale; // poor mans work_group_broadcast
+        float scale;
+        if (lid == 0) {
+            scale = max > 127.0f ? max / 127.0f : 1.0f;
+            out_s[get_group_id(0)] = scale;
+            _scale = scale;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        scale = _scale;
+
+        for (int i = gid * n_el_per_thread; i < (gid + 1) * n_el_per_thread; i++) {
+            out[i] = clamp(round(in[i] / scale));
+        }
     }
 
     __kernel void q4f32s_qi8f32s_offline_v1(
@@ -125,10 +157,53 @@ const string cl_src = CL_SRC(
         if (get_local_id(0) == 0) {
             acc1 = acc1_local[0][row_sz2_block] + acc1_local[1][row_sz2_block];
             acc2 = acc2_local[0][row_sz2_block] + acc2_local[1][row_sz2_block];
-            out[out_qblock * 128 + row_sz2_block * 2] = clamp(acc1 / out_scales[out_qblock]); // check out_scales
-            out[out_qblock * 128 + row_sz2_block * 2 + 1] = clamp(acc2 / out_scales[out_qblock]); // check out_scales
+            out[out_qblock * 128 + row_sz2_block * 2] = acc1; // check out_scales
+            out[out_qblock * 128 + row_sz2_block * 2 + 1] = acc2; // check out_scales
         }
     });
+
+// NOT THREAD SAFE!
+void f32_qi8f32s(float* in, int8_t* out, float* out_s, int n, int n_threads)
+{
+    assert(128 <= n && n <= 32768 && "n must be between 128 and 32768");
+    assert(n % 128 == 0 && "n must be a multiple of 128");
+
+    cl_int clStatus;
+    clStatus = clSetKernelArgSVMPointer(f32_qi8f32s_kernel, 0, in);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - in")
+    clStatus = clSetKernelArgSVMPointer(f32_qi8f32s_kernel, 1, out);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - out")
+    clStatus = clSetKernelArgSVMPointer(f32_qi8f32s_kernel, 2, out_s);
+    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - out_s")
+    clStatus = clSetKernelArg(f32_qi8f32s_kernel, 3, sizeof(int), &n);
+
+    // 4-256 elements per thread;
+    int n_el_per_thread = ceil(n / 256); // 256 threads in this dimension
+    while (QBLOCK_SIZE % n_el_per_thread != 0) {
+        n_el_per_thread++;
+    }
+    clStatus = clSetKernelArg(f32_qi8f32s_kernel, 4, sizeof(int), &n_el_per_thread);
+
+    const size_t global_work_size = n / n_el_per_thread;
+    const size_t local_work_size = QBLOCK_SIZE / n_el_per_thread;
+    // local group size = (n/npt) / (QBLOCK_SIZE/npt) = n / QBLOCK_SIZE
+
+    cl_event ev;
+    clStatus = clEnqueueNDRangeKernel(
+        queue, f32_qi8f32s_kernel,
+        1, nullptr,
+        &global_work_size, &local_work_size,
+        0, nullptr, &ev);
+    CL_CHECK(clStatus, "f32_qi8f32s kernel invocation")
+
+    clStatus = clWaitForEvents(1, &ev);
+    CL_CHECK(clStatus, "clWaitForEvents - f32_qi8f32s")
+    clStatus = clReleaseEvent(ev);
+    CL_CHECK(clStatus, "clReleaseEvent - f32_qi8f32s")
+
+    clStatus = clFinish(queue);
+    CL_CHECK(clStatus, "clFinish - f32_qi8f32s")
+}
 
 // DO NOT CALL FROM MULTIPLE THREADS!
 void q4f32s_qi8f32s_egemv_offline(
@@ -170,8 +245,8 @@ void q4f32s_qi8f32s_egemv_offline(
 
     cl_event event;
     const size_t _m = m;
-    const size_t _n = n;
-    // global work size is the number of work items in each dimension
+    // const size_t _n = n;
+    //  global work size is the number of work items in each dimension
     const size_t global_work_size[] = { 2, 64, _m / 128 };
     // local work size is the number of work items in each work group
     const size_t local_work_size[] = { 2, 64, 1 };
@@ -196,70 +271,72 @@ void q4f32s_qi8f32s_egemv_offline(
     CL_CHECK(clStatus, "clFinish - q4f32s_qi8f32s_offline_v1_kernel")
 }
 
-void q4f32s_qi8f32s_egemv_offline_ev(
-    uint8_t* w,
-    float* s,
-    uint8_t* z,
-    int8_t* in,
-    float* in_scales,
-    int8_t* out,
-    float* out_scales,
-    int m, int n,
-    cl_uint n_events,
-    const cl_event* event_wait_list,
-    cl_event* event)
+/*
+    =============
+       TESTING
+    =============
+*/
+#define SETUP_QUANT_TENSORS(n)                                                             \
+    float* in = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, n * sizeof(float), 64);     \
+    int8_t* out = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, n * sizeof(int8_t), 64); \
+    float* out_s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, n / QBLOCK_SIZE * sizeof(float), 64);
+
+#define MAP_QUANT_TENSORS()                 \
+    SVMMAP(queue, in, n * sizeof(float));   \
+    SVMMAP(queue, out, n * sizeof(int8_t)); \
+    SVMMAP(queue, out_s, n / QBLOCK_SIZE * sizeof(float))
+
+#define UNMAP_QUANT_TENSORS() \
+    SVMUNMAP(queue, in);      \
+    SVMUNMAP(queue, out);     \
+    SVMUNMAP(queue, out_s)
+
+#define TEARDOWN_QUANT_TENSORS() \
+    clSVMFree(context, in);      \
+    clSVMFree(context, out);     \
+    clSVMFree(context, out_s)
+
+#define BROADCAST(ptr, v, len)      \
+    for (int i = 0; i < (len); i++) \
+    (ptr)[i] = (v)
+
+template <typename T>
+void ASSERT_ARRAY_EQ(T* expected, T* actual, int n)
 {
-    assert(m >= 512 && n >= 512 && "m and n must be at least 128");
-    assert(m <= 32768 && n <= 32768 && "m and n can be at most 16384");
-    assert(m % 512 == 0 && n % 512 == 0 && "m and n must be multiples of 128");
-
-    cl_int clStatus;
-    cl_kernel _k = clCloneKernel(q4f32s_qi8f32s_offline_v1_kernel, &clStatus);
-
-    clStatus = clSetKernelArgSVMPointer(_k, 0, w);
-    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - w")
-    clStatus = clSetKernelArgSVMPointer(_k, 1, s);
-    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - s")
-    clStatus = clSetKernelArgSVMPointer(_k, 2, z);
-    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - z")
-    clStatus = clSetKernelArgSVMPointer(_k, 3, in);
-    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - in")
-    clStatus = clSetKernelArgSVMPointer(_k, 4, in_scales);
-    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - in_scales")
-    clStatus = clSetKernelArgSVMPointer(_k, 5, out);
-    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - out")
-    clStatus = clSetKernelArgSVMPointer(_k, 6, out_scales);
-    CL_CHECK(clStatus, "clSetKernelArgSVMPointer - out_scales")
-    clStatus = clSetKernelArg(_k, 7, sizeof(int), &m);
-    CL_CHECK(clStatus, "clSetKernelArg - m")
-    clStatus = clSetKernelArg(_k, 8, sizeof(int), &n);
-    CL_CHECK(clStatus, "clSetKernelArg - n")
-    int n_blocks_per_thread = n / 2 / 128;
-    clStatus = clSetKernelArg(_k, 9, sizeof(int), &n_blocks_per_thread);
-    CL_CHECK(clStatus, "clSetKernelArg - n_blocks_per_thread")
-
-    const size_t _m = m;
-    const size_t _n = n;
-    // global work size is the number of work items in each dimension
-    const size_t global_work_size[] = { 2, 64, _m / 128 };
-    // local work size is the number of work items in each work group
-    const size_t local_work_size[] = { 2, 64, 1 };
-    // n work groups per dimension is found by dividing the global work size by the local work size
-    // in each dimension
-    // local_id = { 0-1, 0-63, 0-m/128 - 1 }
-    // each row is split in two halfs
-    // each out_block is split into 64 threads doing 2 rows each.
-    clStatus = clEnqueueNDRangeKernel(
-        queue, q4f32s_qi8f32s_offline_v1_kernel,
-        3, nullptr,
-        global_work_size, local_work_size,
-        n_events, event_wait_list, event);
-    CL_CHECK(clStatus, "q4f32s_qi8f32s_offline_v1_kernel invocation")
-    clStatus = clReleaseKernel(_k);
-    CL_CHECK(clStatus, "clReleaseKernel - q4f32s_qi8f32s_offline_v1_kernel")
+    bool failed = false;
+    int n_different = 0;
+    for (int i = 0; i < n; i++) {
+        if (expected[i] != actual[i]) {
+            cout << "expected[" << i << "] = " << expected[i] << ", actual[" << i << "] = " << actual[i] << "; diff: " << (abs(expected[i] - actual[i])) << endl;
+            failed = true;
+            n_different++;
+        }
+    }
+    if (failed) {
+        cout << "Number of different elements: " << n_different << "/" << n << ", " << (float)n_different / (float)n * 100 << "%" << endl;
+        FAIL();
+    }
 }
 
-void test_vec_add()
+template <typename T>
+void ASSERT_ARRAY_EQ(T expected, T* actual, int n)
+{
+    bool failed = false;
+    int n_different = 0;
+    for (int i = 0; i < n; i++) {
+        if (expected != actual[i]) {
+            cout << "expected: " << expected << ", actual[" << i << "] = " << actual[i] << endl;
+            failed = true;
+            n_different++;
+        }
+    }
+    if (failed) {
+        cout << "Number of different elements: " << n_different << ", " << (float)n_different / (float)n * 100 << "%" << endl;
+        FAIL();
+    }
+}
+
+TEST(VectorAdd, Trivial)
 {
     const int n = 1024;
 
@@ -268,15 +345,15 @@ void test_vec_add()
     float* c = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, n * sizeof(float), 64);
 
     SVMMAP(queue, a, n * sizeof(float));
-    BROADCAST(a, n, 1.0f);
+    BROADCAST(a, 1.0f, n);
     SVMUNMAP(queue, a);
 
     SVMMAP(queue, b, n * sizeof(float));
-    BROADCAST(b, n, 2.0f);
+    BROADCAST(b, 2.0f, n);
     SVMUNMAP(queue, b);
 
     SVMMAP(queue, c, n * sizeof(float));
-    BROADCAST(c, n, 0.0f);
+    BROADCAST(c, 0.0f, n);
     SVMUNMAP(queue, c);
 
     cl_int clStatus;
@@ -300,6 +377,7 @@ void test_vec_add()
     CL_CHECK(clStatus, "vec add kernel");
 
     clWaitForEvents(1, &event);
+    clFinish(queue);
 
     SVMMAP(queue, c, n * sizeof(float));
     bool passed = true;
@@ -310,10 +388,8 @@ void test_vec_add()
         }
     }
     SVMUNMAP(queue, c);
-    if (passed) {
-        cout << "Vector Add Passed!" << endl;
-    } else {
-        cout << "Vector Add Failed!" << endl;
+    if (!passed) {
+        FAIL();
     }
 
     clSVMFree(context, a);
@@ -321,6 +397,250 @@ void test_vec_add()
     clSVMFree(context, c);
 }
 
+class QuantContrived : public testing::TestWithParam<int> { };
+TEST_P(QuantContrived, Positive_Below_127)
+{
+    int n = GetParam();
+
+    SETUP_QUANT_TENSORS(n);
+    MAP_QUANT_TENSORS();
+
+    BROADCAST(in, 2.0f, n);
+    BROADCAST(out, 0, n);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+
+    UNMAP_QUANT_TENSORS();
+
+    int n_threads = 4;
+    f32_qi8f32s(in, out, out_s, n, n_threads);
+
+    MAP_QUANT_TENSORS();
+
+    ASSERT_ARRAY_EQ((int8_t)2, out, n);
+    ASSERT_ARRAY_EQ(1.0f, out_s, n / QBLOCK_SIZE);
+
+    UNMAP_QUANT_TENSORS();
+
+    TEARDOWN_QUANT_TENSORS();
+}
+TEST_P(QuantContrived, Positive_And_Negative_Below_127)
+{
+    int n = GetParam();
+
+    SETUP_QUANT_TENSORS(n);
+
+    MAP_QUANT_TENSORS();
+
+    BROADCAST(in, 2.0f, n / 2);
+    BROADCAST(&in[n / 2], -2.0f, n / 2);
+    BROADCAST(out, 0, n);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+
+    UNMAP_QUANT_TENSORS();
+
+    int n_threads = 4;
+    f32_qi8f32s(in, out, out_s, n, n_threads);
+
+    MAP_QUANT_TENSORS();
+
+    for (int i = 0; i < n; i++) {
+        EXPECT_EQ(i < n / 2 ? 2 : -2, out[i]);
+    }
+
+    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+        EXPECT_FLOAT_EQ(1.0f, out_s[i]);
+    }
+
+    UNMAP_QUANT_TENSORS();
+
+    TEARDOWN_QUANT_TENSORS();
+}
+TEST_P(QuantContrived, Positive_Greater_Than_127)
+{
+    int n = GetParam();
+
+    SETUP_QUANT_TENSORS(n);
+
+    MAP_QUANT_TENSORS();
+
+    for (int i = 0; i < n; i++)
+        in[i] = (float)i;
+    BROADCAST(out, 0, n);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+
+    UNMAP_QUANT_TENSORS();
+
+    int n_threads = 4;
+    f32_qi8f32s(in, out, out_s, n, n_threads);
+
+    vector<int8_t> expected(n, 0.0f);
+    vector<float> expected_s(n / QBLOCK_SIZE, 0.0f);
+
+    for (int i = 0; i < n; i++) {
+        float expected_scale = ((i / QBLOCK_SIZE + 1) * QBLOCK_SIZE - 1) / 127.0f;
+        expected[i] = static_cast<int8_t>(roundf(i / expected_scale));
+        expected_s[i / QBLOCK_SIZE] = expected_scale;
+    }
+
+    MAP_QUANT_TENSORS();
+
+    ASSERT_ARRAY_EQ(expected.data(), out, n);
+    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+        EXPECT_FLOAT_EQ(expected_s[i], out_s[i]);
+    }
+
+    TEARDOWN_QUANT_TENSORS();
+}
+TEST_P(QuantContrived, Positive_Negative_Greater_Than_127)
+{
+    int n = GetParam();
+
+    SETUP_QUANT_TENSORS(n);
+
+    MAP_QUANT_TENSORS();
+
+    for (int i = 0; i < n / 2; i++)
+        in[i] = (float)i;
+    for (int i = n / 2; i < n; i++)
+        in[i] = (float)-i;
+    BROADCAST(out, 0, n);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+
+    UNMAP_QUANT_TENSORS();
+
+    int n_threads = 4;
+    f32_qi8f32s(in, out, out_s, n, n_threads);
+
+    MAP_QUANT_TENSORS();
+
+    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+        float scale = ((i + 1) * QBLOCK_SIZE - 1) / 127.0f;
+        EXPECT_FLOAT_EQ(scale, out_s[i]);
+    }
+
+    vector<int8_t> expected(n, 0.0f);
+    for (int i = 0; i < n; i++) {
+        float expected_scale = ((i / QBLOCK_SIZE + 1) * QBLOCK_SIZE - 1) / 127.0f;
+        expected[i] = static_cast<int8_t>(round((i < n / 2 ? (float)i : (float)(-i)) / expected_scale));
+    }
+    ASSERT_ARRAY_EQ(expected.data(), out, n);
+
+    TEARDOWN_QUANT_TENSORS();
+}
+class QuantReferenceFuzz : public testing::TestWithParam<int> { };
+TEST_P(QuantReferenceFuzz, Fuzz)
+{
+    int n = GetParam();
+
+    SETUP_QUANT_TENSORS(n);
+    int8_t* out_ref = (int8_t*)_mm_malloc(n, 64);
+    float* out_s_ref = (float*)_mm_malloc(n / QBLOCK_SIZE * sizeof(float), 64);
+
+    MAP_QUANT_TENSORS();
+
+    for (int i = 0; i < n; i++)
+        in[i] = (float)(rand() % 1024 - 512);
+    BROADCAST(out_s, 0.0f, n / QBLOCK_SIZE);
+    BROADCAST(out_s_ref, 0.0f, n / QBLOCK_SIZE);
+    BROADCAST(out, 0, n);
+    BROADCAST(out_ref, 0, n);
+
+    UNMAP_QUANT_TENSORS();
+
+    int n_threads = 4;
+    f32_qi8f32s(in, out, out_s, n, n_threads);
+    ref_f32_qi8f32s(in, out_ref, out_s_ref, n);
+
+    MAP_QUANT_TENSORS();
+
+    ASSERT_ARRAY_EQ(out_ref, out, n);
+    for (int i = 0; i < n / QBLOCK_SIZE; i++) {
+        EXPECT_FLOAT_EQ(out_s_ref[i], out_s[i]);
+    }
+
+    TEARDOWN_QUANT_TENSORS();
+    _mm_free(out_ref);
+    _mm_free(out_s_ref);
+}
+INSTANTIATE_TEST_SUITE_P(, QuantContrived, testing::Values(512, 1024, 2048, 2560, 4096, 10240, 14336));
+INSTANTIATE_TEST_SUITE_P(, QuantReferenceFuzz, testing::Values(512, 1024, 2048, 2560, 4096, 10240, 14336));
+
+/*
+    =============
+       TESTING
+    =============
+*/
+
+int main(int argc, char** argv)
+{
+    cl_int clStatus;
+    cl_device_id device[1];
+    cl_uint numDevices = 1;
+    clStatus = clGetDeviceIDs(NULL, CL_DEVICE_TYPE_GPU, numDevices, device, NULL);
+    CL_CHECK(clStatus, "clGetDeviceIDs");
+
+    char dev_name[128];
+    clStatus = clGetDeviceInfo(device[0], CL_DEVICE_NAME, 128, dev_name, nullptr);
+    CL_CHECK(clStatus, "clGetDeviceInfo - CL_DEVICE_NAME");
+    cout << "Chose Device: " << dev_name << endl;
+
+    cl_uint max_compute_units;
+    clStatus = clGetDeviceInfo(device[0], CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cl_uint), &max_compute_units, nullptr);
+    CL_CHECK(clStatus, "clGetDeviceInfo - CL_DEVICE_MAX_COMPUTE_UNITS");
+    cout << "Processing Elements: " << max_compute_units << endl;
+
+    cl_ulong shared_memory_size;
+    clStatus = clGetDeviceInfo(device[0], CL_DEVICE_LOCAL_MEM_SIZE, sizeof(cl_ulong), &shared_memory_size, nullptr);
+    CL_CHECK(clStatus, "clGetDeviceInfo - CL_DEVICE_LOCAL_MEM_SIZE");
+    cout << "Shared Memory Size: " << shared_memory_size << " bytes" << endl;
+
+    context = clCreateContext(NULL, 1, device, NULL, NULL, &clStatus);
+    CL_CHECK(clStatus, "clCreateContext");
+
+    cl_queue_properties queue_props[] = { CL_QUEUE_THROTTLE_KHR, CL_QUEUE_THROTTLE_LOW_KHR, 0 };
+    queue = clCreateCommandQueueWithProperties(context, device[0], queue_props, &clStatus);
+    CL_CHECK(clStatus, "clCreateCommandQueue");
+
+    // build kernels
+    char* c_str_cl_src = (char*)cl_src.c_str();
+    cl_program p = clCreateProgramWithSource(context, 1, (const char**)&c_str_cl_src, NULL, &clStatus);
+    CL_CHECK(clStatus, "clCreateProgramWithSource");
+    string CLC_FLAGS = "-cl-std=CL2.0 -cl-mad-enable"; // -cl-fast-relaxed-math";
+    clStatus = clBuildProgram(p, 1, device, CLC_FLAGS.c_str(), NULL, NULL);
+    if (clStatus != CL_SUCCESS) {
+        size_t log_size;
+        clGetProgramBuildInfo(p, device[0], CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        char* log = (char*)malloc(log_size + 1);
+        clGetProgramBuildInfo(p, device[0], CL_PROGRAM_BUILD_LOG, log_size + 1, log, NULL);
+        cout << "Build Errors:\n\n"
+             << log << endl;
+        free(log);
+        exit(1);
+    }
+
+    vec_add_kernel = clCreateKernel(p, "vec_add", &clStatus);
+    CL_CHECK(clStatus, "clCreateKernel - vec_add");
+    q4f32s_qi8f32s_offline_v1_kernel = clCreateKernel(p, "q4f32s_qi8f32s_offline_v1", &clStatus);
+    CL_CHECK(clStatus, "clCreateKernel - q4f32s_qi8f32s_offline_v1");
+    f32_qi8f32s_kernel = clCreateKernel(p, "f32_qi8f32s", &clStatus);
+    CL_CHECK(clStatus, "clCreateKernel - f32s_qi8f32s");
+
+    srand(1);
+
+    testing::InitGoogleTest(&argc, argv);
+    int test_result = RUN_ALL_TESTS();
+
+    // cleanup
+    clReleaseKernel(vec_add_kernel);
+    clReleaseKernel(q4f32s_qi8f32s_offline_v1_kernel);
+    clReleaseKernel(f32_qi8f32s_kernel);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+
+    return test_result;
+}
+
+/*
 void test_512x512_input()
 {
     const int m = 512;
@@ -1125,88 +1445,4 @@ void test_throttle()
     clSVMFree(context, w_down_proj);
     clSVMFree(context, s_down_proj);
     clSVMFree(context, z_down_proj);
-}
-
-int main(int argc, char** argv)
-{
-    cl_int clStatus;
-    cl_device_id device[1];
-    cl_uint numDevices = 1;
-    clStatus = clGetDeviceIDs(NULL, CL_DEVICE_TYPE_GPU, numDevices, device, NULL);
-    CL_CHECK(clStatus, "clGetDeviceIDs");
-
-    char dev_name[128];
-    clStatus = clGetDeviceInfo(device[0], CL_DEVICE_NAME, 128, dev_name, nullptr);
-    CL_CHECK(clStatus, "clGetDeviceInfo - CL_DEVICE_NAME");
-    cout << "Chose Device: " << dev_name << endl;
-
-    cl_uint max_compute_units;
-    clStatus = clGetDeviceInfo(device[0], CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(cl_uint), &max_compute_units, nullptr);
-    CL_CHECK(clStatus, "clGetDeviceInfo - CL_DEVICE_MAX_COMPUTE_UNITS");
-    cout << "Processing Elements: " << max_compute_units << endl;
-
-    cl_ulong shared_memory_size;
-    clStatus = clGetDeviceInfo(device[0], CL_DEVICE_LOCAL_MEM_SIZE, sizeof(cl_ulong), &shared_memory_size, nullptr);
-    CL_CHECK(clStatus, "clGetDeviceInfo - CL_DEVICE_LOCAL_MEM_SIZE");
-    cout << "Shared Memory Size: " << shared_memory_size << " bytes" << endl;
-
-    context = clCreateContext(NULL, 1, device, NULL, NULL, &clStatus);
-    CL_CHECK(clStatus, "clCreateContext");
-
-    cl_queue_properties queue_props[] = { CL_QUEUE_THROTTLE_KHR, CL_QUEUE_THROTTLE_LOW_KHR, 0 };
-    queue = clCreateCommandQueueWithProperties(context, device[0], queue_props, &clStatus);
-    CL_CHECK(clStatus, "clCreateCommandQueue");
-
-    // build kernels
-    char* c_str_cl_src = (char*)cl_src.c_str();
-    cl_program p = clCreateProgramWithSource(context, 1, (const char**)&c_str_cl_src, NULL, &clStatus);
-    CL_CHECK(clStatus, "clCreateProgramWithSource");
-    string CLC_FLAGS = "-cl-std=CL2.0 -cl-mad-enable -cl-fast-relaxed-math";
-    clStatus = clBuildProgram(p, 1, device, CLC_FLAGS.c_str(), NULL, NULL);
-    if (clStatus != CL_SUCCESS) {
-        size_t log_size;
-        clGetProgramBuildInfo(p, device[0], CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
-        char* log = (char*)malloc(log_size + 1);
-        clGetProgramBuildInfo(p, device[0], CL_PROGRAM_BUILD_LOG, log_size + 1, log, NULL);
-        cout << "Build Errors:\n\n"
-             << log << endl;
-        free(log);
-        exit(1);
-    }
-
-    vec_add_kernel = clCreateKernel(p, "vec_add", &clStatus);
-    CL_CHECK(clStatus, "clCreateKernel - vec_add");
-    q4f32s_qi8f32s_offline_v1_kernel = clCreateKernel(p, "q4f32s_qi8f32s_offline_v1", &clStatus);
-    CL_CHECK(clStatus, "clCreateKernel - q4f32s_qi8f32s_offline_v1");
-
-    // test kernels
-    cout << endl
-         << "Testing vec_add..." << endl;
-    test_vec_add();
-
-    cout << endl
-         << "Testing 512x512 input..." << endl;
-    test_512x512_input();
-
-    if (argc == 2) {
-        if (string(argv[1]) == "fuzz") {
-            cout << "Fuzzing tests across all supported input dimensions ..." << endl;
-            cout << "This will take a long time" << endl;
-            test_dim_fuzz();
-        } else if (string(argv[1]) == "throttle") {
-            test_throttle();
-            exit(0);
-        }
-    } else {
-        cout << "Skipping Fuzz. run `./cpu.exe fuzz` to fuzz" << endl;
-    }
-    cout << endl;
-
-    bench_llama_up_proj();
-    bench_llama_ffn();
-
-    // cleanup
-    clReleaseKernel(vec_add_kernel);
-    clReleaseCommandQueue(queue);
-    clReleaseContext(context);
-}
+}*/

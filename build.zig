@@ -76,6 +76,32 @@ pub fn build(b: *std.Build) void {
         run_step.dependOn(&run_cmd.step);
     }
 
+    // ===== test igpu =====
+    {
+        const exe = b.addExecutable(.{
+            .name = "test_igpu",
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.addCSourceFiles(.{ .root = .{ .path = "src" }, .files = &.{
+            "igpu.cpp",
+            "ref.cpp",
+        }, .flags = &.{ "-Wall", "-Werror", "-std=c++17" } });
+        exe.addIncludePath(.{ .path = "include" });
+        exe.addIncludePath(gtest_upstream.path("googletest/include"));
+        exe.linkLibC();
+        exe.linkLibCpp();
+        exe.linkLibrary(gtest);
+        exe.linkSystemLibrary("OpenCL");
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        const run_step = b.step("test_igpu", "Test IGPU Implementation");
+        run_step.dependOn(&run_cmd.step);
+    }
+
     // ===== bench ggml =====
     {
         const exe = b.addExecutable(.{

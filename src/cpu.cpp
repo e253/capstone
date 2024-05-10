@@ -134,7 +134,7 @@ static inline __m512i load_weights(const uint8_t* w)
 }
 
 #define N_ITER 1 // can't be changed right now
-#define ITER_LENGTH 512 // can be changed to multiple of 512
+#define ITER_LENGTH 16384 // can be changed to multiple of 512
 thread_ret_t q4f32s_qi8f32s_egemv_thread(void* _params)
 {
     struct q4f32s_qi8f32s_egemv_params* params = (q4f32s_qi8f32s_egemv_params*)_params;
@@ -153,10 +153,10 @@ thread_ret_t q4f32s_qi8f32s_egemv_thread(void* _params)
     assert(ITER_LENGTH % 128 == 0 && "ITER_LENGTH must be a multiple of 128");
     assert(N_ITER == 1 && "N_ITER must be 1");
     // printf("TID: %d - %d col_blocks\n", params->tid, n / ITER_LENGTH);
-    for (int col_block = 0; col_block < n / ITER_LENGTH; col_block++) { // NOT QUANT BLOCK!
+    for (int col_block = 0; col_block < (n + ITER_LENGTH - 1) / ITER_LENGTH; col_block++) { // NOT QUANT BLOCK!
         for (int row = start_row; row < end_row; row += N_ITER) {
             float acc = 0;
-            for (int col = col_block * ITER_LENGTH; col < (col_block + 1) * ITER_LENGTH; col += QBLOCK_SIZE) {
+            for (int col = col_block * ITER_LENGTH; col < min(n, (col_block + 1) * ITER_LENGTH); col += QBLOCK_SIZE) {
                 int n_in_qblocks = n / QBLOCK_SIZE;
                 int in_qblock = col / QBLOCK_SIZE;
                 int out_qblock = row / QBLOCK_SIZE;
@@ -313,7 +313,7 @@ thread_ret_t q4f32s_qi8f32s_ffn_thread(void* _params)
     struct q4f32s_qi8f32s_ffn_params* params = (q4f32s_qi8f32s_ffn_params*)_params;
 
     q4f32s_tensor* up_proj = params->up_proj;
-    // q4f32s_tensor* gate_proj = params->gate_proj;
+    q4f32s_tensor* gate_proj = params->gate_proj;
     q4f32s_tensor* down_proj = params->down_proj;
     f32_vector* x = params->x;
     qi8f32s_vector* xq = params->xq;
@@ -355,20 +355,20 @@ thread_ret_t q4f32s_qi8f32s_ffn_thread(void* _params)
     };
     q4f32s_qi8f32s_egemv_thread(&up_proj_params);
 
-    // // gate_proj(xq) --> s2 (hidden_dim, )
-    // struct q4f32s_qi8f32s_egemv_params gate_proj_params = {
-    //     gate_proj->data,
-    //     gate_proj->s,
-    //     gate_proj->z,
-    //     xq->data,
-    //     xq->s,
-    //     s2->data,
-    //     gate_proj->m, // hidden_dim
-    //     gate_proj->n, // dim
-    //     tid,
-    //     n_threads,
-    // };
-    // q4f32s_qi8f32s_egemv_thread(&gate_proj_params);
+    // gate_proj(xq) --> s2 (hidden_dim, )
+    struct q4f32s_qi8f32s_egemv_params gate_proj_params = {
+        gate_proj->data,
+        gate_proj->s,
+        gate_proj->z,
+        xq->data,
+        xq->s,
+        s2->data,
+        gate_proj->m, // hidden_dim
+        gate_proj->n, // dim
+        tid,
+        n_threads,
+    };
+    q4f32s_qi8f32s_egemv_thread(&gate_proj_params);
 
     pthread_barrier_wait(op_barrier);
 

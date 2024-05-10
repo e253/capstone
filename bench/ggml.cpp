@@ -46,13 +46,13 @@ void bench_llama_ffn()
     ggml_tensor* x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4096, 1);
     random_init_array((char*)x->data, ggml_nbytes(x));
 
-    ggml_tensor* up_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_1, 4096, 14336);
+    ggml_tensor* up_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_K, 4096, 14336);
     random_init_array((char*)up_proj->data, ggml_nbytes(up_proj));
 
-    ggml_tensor* gate_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_1, 4096, 14336);
+    ggml_tensor* gate_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_K, 4096, 14336);
     random_init_array((char*)gate_proj->data, ggml_nbytes(gate_proj));
 
-    ggml_tensor* down_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_1, 14336, 4096);
+    ggml_tensor* down_proj = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_K, 14336, 4096);
     random_init_array((char*)gate_proj->data, ggml_nbytes(down_proj));
 
     ggml_tensor* up_proj_x = ggml_mul_mat(ctx, up_proj, x);
@@ -72,7 +72,7 @@ void bench_llama_ffn()
     double sec = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
     long long flops_processed = 4096 * 14336 * 6 * NIT;
     double GFLOPS = (double)flops_processed / sec * 1e-9;
-    double BANDWIDTH = (double)(4096 * 14336 * 3) * .625 * double(NIT) / sec * 1e-9;
+    double BANDWIDTH = (double)(4096 * 14336 * 3) * .5625 * double(NIT) / sec * 1e-9;
     // .625 bytes/value in q4_1
 
     cout << "total: " << sec << " (s)" << endl;

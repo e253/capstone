@@ -87,7 +87,7 @@ void bench_llama_ffn()
     double sec = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
     long long flops_processed = 4096 * 14336 * 6 * NIT;
     double GFLOPS = (double)flops_processed / sec * 1e-9;
-    double BANDWIDTH = (double)(4096 * 14336 * 3) * .53375 * (double)NIT / sec * 1e-9;
+    double BANDWIDTH = (double)(4096 * 14336 * 3) * (4.28125 / 8) * (double)NIT / sec * 1e-9;
 
     cout << "total: " << sec << " (s)" << endl;
     cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;

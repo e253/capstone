@@ -1,5 +1,7 @@
 #include "capstone/capstone.hpp"
+#ifndef BENCH
 #include "gtest/gtest.h"
+#endif
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 #include <cassert>
@@ -267,7 +269,7 @@ void q4f32s_qi8f32s_egemv(
     clStatus = clFinish(queue);
     CL_CHECK(clStatus, "clFinish - q4f32s_qi8f32s_egemv_kernel")
 }
-
+#ifndef BENCH
 /*
     =============
        TESTING
@@ -933,6 +935,166 @@ INSTANTIATE_TEST_SUITE_P(, EGEMVReferenceFuzz, testing::ValuesIn(dims));
        TESTING
     =============
 */
+#endif
+
+void random_init_array(uint8_t* arr, int len)
+{
+    for (int i = 0; i < len; i++) {
+        arr[i] = rand() % 128;
+    }
+}
+
+void bench_llama_ffn()
+{
+    // down proj 4096x14336
+    // gate_proj 14336x4096
+    // up_proj 14336x4096
+    // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
+    // we do not do the elementwise multiply
+    // we do not apply SwiGLU non-linearity in the hidden_dim
+    // just the matmuls. skips 14k ops out of 176M total (4096 * 14336 * 3)
+    cout << "Benchmarking LLAMA FFN ..." << endl;
+    cout << "down_proj @ (up_proj @ x * gate_proj @ x)" << endl;
+    cout << "Hidden Dim: 14436, Dim: 4096" << endl;
+    cout << endl;
+
+    // ==== up_proj ====
+    uint8_t* w_up_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / 2, 64);
+    float* s_up_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_up_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / QBLOCK_SIZE / 2, 64);
+    // SVMMAP(queue, w_up_proj, 14336 * 4096 / 2);
+    // SVMMAP(queue, s_up_proj, 14336 * 4096 / QBLOCK_SIZE * sizeof(float));
+    // SVMMAP(queue, z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
+    // random_init_array((uint8_t*)w_up_proj, 14336 * 4096 / 2);
+    // random_init_array((uint8_t*)s_up_proj, 14336 * 4096 / QBLOCK_SIZE);
+    // random_init_array((uint8_t*)z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
+    // SVMUNMAP(queue, w_up_proj);
+    // SVMUNMAP(queue, s_up_proj);
+    // SVMUNMAP(queue, z_up_proj);
+
+    // // ==== gate_proj ====
+    uint8_t* w_gate_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / 2, 64);
+    float* s_gate_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_gate_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE / 2, 64);
+    // SVMMAP(queue, w_gate_proj, 4096 * 14336 / 2);
+    // SVMMAP(queue, s_gate_proj, 4096 * 14336 / QBLOCK_SIZE * sizeof(float));
+    // SVMMAP(queue, z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+    // random_init_array((uint8_t*)w_gate_proj, 4096 * 14336 / 2);
+    // random_init_array((uint8_t*)s_gate_proj, 4096 * 14336 / QBLOCK_SIZE);
+    // random_init_array((uint8_t*)z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+    // SVMUNMAP(queue, w_gate_proj);
+    // SVMUNMAP(queue, s_gate_proj);
+    // SVMUNMAP(queue, z_gate_proj);
+
+    // // ==== down_proj ====
+    uint8_t* w_down_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / 2, 64);
+    float* s_down_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
+    uint8_t* z_down_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE / 2, 64);
+    // SVMMAP(queue, w_down_proj, 4096 * 14336 / 2);
+    // SVMMAP(queue, s_down_proj, 4096 * 14336 / QBLOCK_SIZE * sizeof(float));
+    // SVMMAP(queue, z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+    // random_init_array((uint8_t*)w_down_proj, 4096 * 14336 / 2);
+    // random_init_array((uint8_t*)s_down_proj, 4096 * 14336 / QBLOCK_SIZE);
+    // random_init_array((uint8_t*)z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
+    // SVMUNMAP(queue, w_down_proj);
+    // SVMUNMAP(queue, s_down_proj);
+    // SVMUNMAP(queue, z_down_proj);
+
+    // global in-out
+    float* x = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * sizeof(float), 64);
+    float* y = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * sizeof(float), 64);
+
+    // scratch space
+    int8_t* xq = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336, 64);
+    float* xq_s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 / QBLOCK_SIZE * sizeof(float), 64);
+    float* s1 = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * sizeof(float), 64);
+    float* s2 = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * sizeof(float), 64);
+
+    // SVMMAP(queue, x, 4096 * sizeof(float));
+    // SVMMAP(queue, y, 4096 * sizeof(float));
+    // SVMMAP(queue, xq, 14336);
+    // SVMMAP(queue, xq_s, 14336 / QBLOCK_SIZE * sizeof(float));
+    // SVMMAP(queue, s1, 14336 * sizeof(float));
+    // SVMMAP(queue, s2, 14336 * sizeof(float));
+    // random_init_array((uint8_t*)x, 4096);
+    // for (int i = 0; i < 14336; i++) {
+    //     y[i % 4096] = 0.0f;
+    //     s1[i] = 0.0f;
+    //     s2[i] = 0.0f;
+    //     xq[i] = 0;
+    //     xq_s[i / QBLOCK_SIZE] = 0.0f;
+    // }
+    // SVMUNMAP(queue, x);
+    // SVMUNMAP(queue, y);
+    // SVMUNMAP(queue, xq);
+    // SVMUNMAP(queue, xq_s);
+    // SVMUNMAP(queue, s1);
+    // SVMUNMAP(queue, s2);
+
+    // ==== bench ====
+    const int NIT = 200;
+    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < NIT; i++) {
+        // Q(x) --> xq
+        f32_qi8f32s(x, xq, xq_s, 4096, 4);
+
+        // up_proj @ xq --> s1
+        q4f32s_qi8f32s_egemv(
+            w_up_proj, s_up_proj, z_up_proj,
+            xq, xq_s,
+            s1,
+            14336, 4096,
+            4);
+
+        // gate_proj @ xq --> s2
+        q4f32s_qi8f32s_egemv(
+            w_gate_proj, s_gate_proj, z_gate_proj,
+            xq, xq_s,
+            s2,
+            14336, 4096,
+            4);
+
+        // Q(s2) --> xq
+        f32_qi8f32s(s2, xq, xq_s, 14336, 4);
+
+        // down_proj @ up_proj_out
+        q4f32s_qi8f32s_egemv(
+            w_down_proj, s_down_proj, z_down_proj,
+            xq, xq_s,
+            y,
+            4096, 14336,
+            4);
+    }
+    auto end = chrono::high_resolution_clock::now();
+
+    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+    cout << "total: " << sec << " (s)" << endl;
+    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
+
+    uint64_t flops_processed = 4096 * 14336 * 6 * (uint64_t)NIT;
+    double flops_per_sec = flops_processed / sec;
+    cout << "GFLOPS: " << flops_per_sec * 1e-9 << endl;
+    double BANDWIDTH = (double)(4096 * 14336 * 3) * (4.28125 / 8) * (double)NIT / sec * 1e-9;
+    cout << "BANDWIDTH: GB/s: " << BANDWIDTH << endl;
+    cout << endl;
+
+    // ==== cleanup ====
+    clSVMFree(context, w_up_proj);
+    clSVMFree(context, s_up_proj);
+    clSVMFree(context, z_up_proj);
+    clSVMFree(context, w_gate_proj);
+    clSVMFree(context, s_gate_proj);
+    clSVMFree(context, z_gate_proj);
+    clSVMFree(context, w_down_proj);
+    clSVMFree(context, s_down_proj);
+    clSVMFree(context, z_down_proj);
+    clSVMFree(context, x);
+    clSVMFree(context, y);
+    clSVMFree(context, xq);
+    clSVMFree(context, xq_s);
+    clSVMFree(context, s1);
+    clSVMFree(context, s2);
+}
 
 int main(int argc, char** argv)
 {
@@ -968,7 +1130,12 @@ int main(int argc, char** argv)
     char* c_str_cl_src = (char*)cl_src.c_str();
     cl_program p = clCreateProgramWithSource(context, 1, (const char**)&c_str_cl_src, NULL, &clStatus);
     CL_CHECK(clStatus, "clCreateProgramWithSource");
+#ifdef BENCH
+    string CLC_FLAGS = "-cl-std=CL2.0 -cl-mad-enable -cl-fast-relaxed-math";
+#else
     string CLC_FLAGS = "-cl-std=CL2.0 -cl-mad-enable"; // -cl-fast-relaxed-math";
+#endif
+
     clStatus = clBuildProgram(p, 1, device, CLC_FLAGS.c_str(), NULL, NULL);
     if (clStatus != CL_SUCCESS) {
         size_t log_size;
@@ -989,9 +1156,12 @@ int main(int argc, char** argv)
     CL_CHECK(clStatus, "clCreateKernel - f32s_qi8f32s");
 
     srand(1);
-
+#ifndef BENCH
     testing::InitGoogleTest(&argc, argv);
     int test_result = RUN_ALL_TESTS();
+#else
+    bench_llama_ffn();
+#endif
 
     // cleanup
     clReleaseKernel(vec_add_kernel);
@@ -999,8 +1169,9 @@ int main(int argc, char** argv)
     clReleaseKernel(f32_qi8f32s_kernel);
     clReleaseCommandQueue(queue);
     clReleaseContext(context);
-
+#ifndef BENCH
     return test_result;
+#endif
 }
 
 /*

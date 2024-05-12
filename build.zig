@@ -19,7 +19,6 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(gtest);
     const argparse = b.dependency("argparse", .{});
     const cl_headers_upstream = b.dependency("cl_headers_upstream", .{});
-    _ = cl_headers_upstream;
 
     // ===== test_ref ======
     {
@@ -89,10 +88,16 @@ pub fn build(b: *std.Build) void {
         }, .flags = &.{ "-Wall", "-Werror", "-std=c++17" } });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
+        exe.addIncludePath(cl_headers_upstream.path(""));
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(gtest);
-        exe.linkSystemLibrary("OpenCL");
+        if (target.result.os.tag == .windows) {
+            exe.addLibraryPath(.{ .path = "C:\\Windows\\System32" });
+            exe.linkSystemLibrary2("opencl", .{ .preferred_link_mode = .dynamic });
+        } else {
+            exe.linkSystemLibrary("OpenCL");
+        }
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
@@ -114,10 +119,16 @@ pub fn build(b: *std.Build) void {
         }, .flags = &.{ "-DBENCH", "-Wall", "-Werror", "-std=c++17" } });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
+        exe.addIncludePath(cl_headers_upstream.path(""));
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(gtest);
-        exe.linkSystemLibrary("OpenCL");
+        if (target.result.os.tag == .windows) {
+            exe.addLibraryPath(.{ .path = "C:\\Windows\\System32" });
+            exe.linkSystemLibrary2("opencl", .{ .preferred_link_mode = .dynamic });
+        } else {
+            exe.linkSystemLibrary("OpenCL");
+        }
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);

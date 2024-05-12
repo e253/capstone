@@ -161,7 +161,29 @@ const string cl_src = CL_SRC(
             out[out_qblock * 128 + row_sz2_block * 2] = acc1;
             out[out_qblock * 128 + row_sz2_block * 2 + 1] = acc2;
         }
-    });
+    }
+
+    // __kernel void q4f32s_qi8f32s_egemv_v2(
+    //     __global uchar4* restrict w,
+    //     __global float* restrict s,
+    //     __global uchar* restrict z,
+    //     __global char8* restrict in,
+    //     __global float* restrict in_scales,
+    //     __global float* restrict out,
+    //     int m, int n, int n_blocks_per_thread) {
+    //     const int QBLOCK_SIZE = 128;
+    //     const int row = (get_global_id(0) << 8) + get_global_id(1);
+
+    //     float acc = 0;
+    //     for (uint blk = 0; blk < n_blocks_per_thread; blk++) {
+    //         half _acc = 0;
+    //         uint offset =
+    //         for (uint i = get_global_id(2) * n_blocks_per_thread; i < 32; i += 8) {
+    //         }
+    //     }
+    // }
+
+);
 
 // NOT THREAD SAFE!
 void f32_qi8f32s(float* in, int8_t* out, float* out_s, int n, int n_threads)

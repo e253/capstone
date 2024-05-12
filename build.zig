@@ -132,7 +132,7 @@ pub fn build(b: *std.Build) void {
         const exe = b.addExecutable(.{
             .name = "bench_ggml",
             .target = target,
-            .optimize = optimize,
+            .optimize = .ReleaseFast,
         });
         exe.addCSourceFiles(.{ .root = .{
             .path = "bench",

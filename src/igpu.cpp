@@ -44,11 +44,11 @@ const string cl_src = CL_SRC(
         return (char)(x > 127.0f ? 127 : (x < -128.0f ? -128 : round(x)));
     }
 
-    char get0(uchar w) {
+    inline char get0(uchar w) {
         return (char)((w >> 4) & 0x0F);
     }
 
-    char get1(uchar w) {
+    inline char get1(uchar w) {
         return (char)(w & 0x0F);
     }
 
@@ -78,7 +78,7 @@ const string cl_src = CL_SRC(
 
         scale = _scale;
 
-        for (int i = gid * n_el_per_thread; i < (gid + 1) * n_el_per_thread; i++) {
+        for (uint i = gid * n_el_per_thread; i < (gid + 1) * n_el_per_thread; i++) {
             out[i] = clamp(round(in[i] / scale));
         }
     }

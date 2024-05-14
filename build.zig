@@ -17,8 +17,20 @@ pub fn build(b: *std.Build) void {
     gtest.addIncludePath(gtest_upstream.path("googletest/include"));
     gtest.addIncludePath(gtest_upstream.path("googletest"));
     b.installArtifact(gtest);
+
     const argparse = b.dependency("argparse", .{});
     const cl_headers_upstream = b.dependency("cl_headers_upstream", .{});
+
+    // build rocl
+    const rocl = b.addStaticLibrary(.{
+        .name = "rocl",
+        .target = target,
+        .optimize = optimize,
+    });
+    rocl.addCSourceFiles(.{ .files = &.{"src/rocl.c"}, .flags = &.{"-DCL_TARGET_OPENCL_VERSION=300"} });
+    rocl.linkLibC();
+    rocl.addIncludePath(cl_headers_upstream.path(""));
+    b.installArtifact(rocl);
 
     // ===== test_ref ======
     {
@@ -104,6 +116,36 @@ pub fn build(b: *std.Build) void {
         run_cmd.step.dependOn(b.getInstallStep());
         if (b.args) |args| run_cmd.addArgs(args);
         const run_step = b.step("test_igpu", "Test IGPU Implementation");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    // test_rocl
+    {
+        const exe = b.addExecutable(.{
+            .name = "test_rocl",
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.addCSourceFiles(.{ .root = .{
+            .path = "test",
+        }, .files = &.{
+            "test_rocl.cpp",
+        }, .flags = &.{
+            "-std=c++17",
+        } });
+        exe.addIncludePath(.{ .path = "include" });
+        exe.addIncludePath(gtest_upstream.path("googletest/include"));
+        exe.addIncludePath(cl_headers_upstream.path(""));
+        exe.linkLibC();
+        exe.linkLibCpp();
+        exe.linkLibrary(gtest);
+        exe.linkLibrary(rocl);
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run_cmd.addArgs(args);
+        const run_step = b.step("test_rocl", "Test rocl.h");
         run_step.dependOn(&run_cmd.step);
     }
 

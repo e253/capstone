@@ -11,6 +11,10 @@ bool rocl_init();
 // Safe even if `rocl_init` failed
 void rocl_deinit();
 
+// Returns a string representation of the OpenCL error code
+// Thanks Selmar on StackOverflow: https://stackoverflow.com/questions/24326432/convenient-way-to-show-opencl-error-codes
+const char* clErrorToString(cl_int err)
+
 #ifdef __cplusplus
 }
 #endif

@@ -211,9 +211,9 @@ const char* clErrorToString(cl_int err)
 
 typedef struct rocl_dispatch_table_s {
     clGetPlatformIDs_fn _clGetPlatformIDs;
-    // clGetPlatformInfo_fn _clGetPlatformInfo;
-    // clGetDeviceIDs_fn _clGetDeviceIDs;
-    // clGetDeviceInfo_fn _clGetDeviceInfo;
+    clGetPlatformInfo_fn _clGetPlatformInfo;
+    clGetDeviceIDs_fn _clGetDeviceIDs;
+    clGetDeviceInfo_fn _clGetDeviceInfo;
     // clCreateContext_fn _clCreateContext;
 } rocl_dispatch_table_t;
 
@@ -231,4 +231,52 @@ clGetPlatformIDs(
     }
 
     return dispatch_table._clGetPlatformIDs(num_entries, platforms, num_platforms);
+}
+
+extern CL_API_ENTRY cl_int CL_API_CALL
+clGetPlatformInfo(
+    cl_platform_id platform,
+    cl_platform_info param_name,
+    size_t param_value_size,
+    void* param_value,
+    size_t* param_value_size_ret) CL_API_SUFFIX__VERSION_1_0
+{
+    if (dispatch_table._clGetPlatformInfo == NULL) {
+        dispatch_table._clGetPlatformInfo = GET_SYM("clGetPlatformInfo", clGetPlatformInfo_fn);
+        CHECK_DL_ERROR();
+    }
+
+    return dispatch_table._clGetPlatformInfo(platform, param_name, param_value_size, param_value, param_value_size_ret);
+}
+
+extern CL_API_ENTRY cl_int CL_API_CALL
+clGetDeviceIDs(
+    cl_platform_id platform,
+    cl_device_type device_type,
+    cl_uint num_entries,
+    cl_device_id* devices,
+    cl_uint* num_devices) CL_API_SUFFIX__VERSION_1_0
+{
+    if (dispatch_table._clGetDeviceIDs == NULL) {
+        dispatch_table._clGetDeviceIDs = GET_SYM("clGetDeviceIDs", clGetDeviceIDs_fn);
+        CHECK_DL_ERROR();
+    }
+
+    return dispatch_table._clGetDeviceIDs(platform, device_type, num_entries, devices, num_devices);
+}
+
+extern CL_API_ENTRY cl_int CL_API_CALL
+clGetDeviceInfo(
+    cl_device_id device,
+    cl_device_info param_name,
+    size_t param_value_size,
+    void* param_value,
+    size_t* param_value_size_ret) CL_API_SUFFIX__VERSION_1_0
+{
+    if (dispatch_table._clGetDeviceInfo == NULL) {
+        dispatch_table._clGetDeviceInfo = GET_SYM("clGetDeviceInfo", clGetDeviceInfo_fn);
+        CHECK_DL_ERROR();
+    }
+
+    return dispatch_table._clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
 }

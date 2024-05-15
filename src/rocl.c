@@ -210,15 +210,33 @@ const char* clErrorToString(cl_int err)
 /* CL Dispatch Functions */
 
 typedef struct rocl_dispatch_table_s {
+    /* Platform API */
     clGetPlatformIDs_fn _clGetPlatformIDs;
     clGetPlatformInfo_fn _clGetPlatformInfo;
     clGetDeviceIDs_fn _clGetDeviceIDs;
     clGetDeviceInfo_fn _clGetDeviceInfo;
-    // clCreateContext_fn _clCreateContext;
+    /* Context API */
+    clCreateContext_fn _clCreateContext;
+    clReleaseContext_fn _clReleaseContext;
+    /* Command Queue API */
+    clCreateCommandQueueWithProperties_fn _clCreateCommandQueueWithProperties;
+    // clReleaseCommandQueue_fn _clReleaseCommandQueue;
+    /* Program Object API */
+    clCreateProgramWithSource_fn _clCreateProgramWithSource;
+    // clReleaseProgram_fn _clReleaseProgram;
+    // clBuildProgram_fn _clBuildProgram;
+    // clGetProgramBuildInfo_fn _clGetProgramBuildInfo;
+    /* Kernel API */
+    // clCreateKernel_fn _clCreateKernel;
+    // clReleaseKernel_fn _clReleaseKernel;
+    // clSetKernelArg_fn _clSetKernelArg;
+    // clSetKernelArgSVMPointer_fn _clSetKernelArgSVMPointer;
+    // clEnqueueNDRangeKernel_fn _clEnqueueNDRangeKernel;
 } rocl_dispatch_table_t;
 
 static rocl_dispatch_table_t dispatch_table = { 0 };
 
+/* Platform API */
 extern CL_API_ENTRY cl_int CL_API_CALL
 clGetPlatformIDs(
     cl_uint num_entries,
@@ -279,4 +297,68 @@ clGetDeviceInfo(
     }
 
     return dispatch_table._clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
+}
+
+/* Context API */
+extern CL_API_ENTRY cl_context CL_API_CALL
+clCreateContext(const cl_context_properties* properties,
+    cl_uint num_devices,
+    const cl_device_id* devices,
+    void(CL_CALLBACK* pfn_notify)(const char* errinfo,
+        const void* private_info,
+        size_t cb,
+        void* user_data),
+    void* user_data,
+    cl_int* errcode_ret) CL_API_SUFFIX__VERSION_1_0
+{
+    if (dispatch_table._clCreateContext == NULL) {
+        dispatch_table._clCreateContext = GET_SYM("clCreateContext", clCreateContext_fn);
+        CHECK_DL_ERROR();
+    }
+
+    return dispatch_table._clCreateContext(properties, num_devices, devices, pfn_notify, user_data, errcode_ret);
+}
+
+extern CL_API_ENTRY cl_int CL_API_CALL
+clReleaseContext(cl_context context) CL_API_SUFFIX__VERSION_1_0
+{
+    if (dispatch_table._clReleaseContext == NULL) {
+        dispatch_table._clReleaseContext = GET_SYM("clReleaseContext", clReleaseContext_fn);
+        CHECK_DL_ERROR();
+    }
+
+    return dispatch_table._clReleaseContext(context);
+}
+
+/* Command Queue API */
+
+// Requires OpenCL 2.0 or higher.
+// Check before calling or the program will crash.
+extern CL_API_ENTRY cl_command_queue CL_API_CALL
+clCreateCommandQueueWithProperties(cl_context context,
+    cl_device_id device,
+    const cl_queue_properties* properties,
+    cl_int* errcode_ret) CL_API_SUFFIX__VERSION_2_0
+{
+    if (dispatch_table._clCreateCommandQueueWithProperties == NULL) {
+        dispatch_table._clCreateCommandQueueWithProperties = GET_SYM("clCreateCommandQueueWithProperties", clCreateCommandQueueWithProperties_fn);
+        CHECK_DL_ERROR();
+    }
+
+    return dispatch_table._clCreateCommandQueueWithProperties(context, device, properties, errcode_ret);
+}
+
+extern CL_API_ENTRY cl_program CL_API_CALL
+clCreateProgramWithSource(cl_context context,
+    cl_uint count,
+    const char** strings,
+    const size_t* lengths,
+    cl_int* errcode_ret) CL_API_SUFFIX__VERSION_1_0
+{
+    if (dispatch_table._clCreateProgramWithSource == NULL) {
+        dispatch_table._clCreateProgramWithSource = GET_SYM("clCreateProgramWithSource", clCreateProgramWithSource_fn);
+        CHECK_DL_ERROR();
+    }
+
+    return dispatch_table._clCreateProgramWithSource(context, count, strings, lengths, errcode_ret);
 }

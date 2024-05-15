@@ -13,7 +13,7 @@ void rocl_deinit();
 
 // Returns a string representation of the OpenCL error code
 // Thanks Selmar on StackOverflow: https://stackoverflow.com/questions/24326432/convenient-way-to-show-opencl-error-codes
-const char* clErrorToString(cl_int err)
+const char* clErrorToString(cl_int err);
 
 #ifdef __cplusplus
 }

@@ -96,6 +96,34 @@ TEST(QueryAPI, GetDeviceInfo)
     free(platforms);
 }
 
+TEST(ConextAPI, CreateAndReleaseContext)
+{
+    cl_uint num_platforms;
+    cl_int ret = clGetPlatformIDs(0, NULL, &num_platforms);
+    ASSERT_EQ(ret, CL_SUCCESS);
+    cl_platform_id* platforms = (cl_platform_id*)malloc(num_platforms * sizeof(cl_platform_id));
+    ret = clGetPlatformIDs(num_platforms, platforms, NULL);
+    ASSERT_EQ(ret, CL_SUCCESS);
+
+    for (cl_uint i = 0; i < num_platforms; i++) {
+        cl_uint num_devices;
+        ret = clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_ALL, 0, NULL, &num_devices);
+        ASSERT_EQ(ret, CL_SUCCESS);
+        cl_device_id* devices = (cl_device_id*)malloc(num_devices * sizeof(cl_device_id));
+        ret = clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_ALL, num_devices, devices, NULL);
+        ASSERT_EQ(ret, CL_SUCCESS);
+
+        cl_context context = clCreateContext(NULL, num_devices, devices, NULL, NULL, &ret);
+        ASSERT_EQ(ret, CL_SUCCESS);
+        ret = clReleaseContext(context);
+        ASSERT_EQ(ret, CL_SUCCESS);
+
+        free(devices);
+    }
+
+    free(platforms);
+}
+
 int main(int argc, char** argv)
 {
     bool ocl_loaded = rocl_init();

@@ -126,16 +126,16 @@ TEST(ConextAPI, CreateAndReleaseContext)
 
 int main(int argc, char** argv)
 {
-    bool ocl_loaded = rocl_init();
-    if (!ocl_loaded) {
-        cout << "OCL was not found on the system, tests cannot run." << endl;
-        cout << "if `clinfo` finds things, then there is a problem" << endl;
-        return 0;
-    }
+    // bool ocl_loaded = rocl_init();
+    //  if (!ocl_loaded) {
+    //      cout << "OCL was not found on the system, tests cannot run." << endl;
+    //      cout << "if `clinfo` finds things, then there is a problem" << endl;
+    //      return 0;
+    //  }
     testing::InitGoogleTest(&argc, argv);
     int test_ret = RUN_ALL_TESTS();
 
-    rocl_deinit();
+    // rocl_deinit();
 
     return test_ret;
 }

@@ -1121,9 +1121,29 @@ void bench_llama_ffn()
 int main(int argc, char** argv)
 {
     cl_int clStatus;
+
+    // make sure a device exists
+    cl_uint platformCount;
+    clStatus = clGetPlatformIDs(0, NULL, &platformCount);
+    CL_CHECK(clStatus, "clPlatformIDs");
+    if (platformCount == 0) {
+        cout << "No OpenCL Platforms Found ... Quitting" << endl;
+        exit(0);
+    }
+    cl_platform_id* platforms = (cl_platform_id*)malloc(sizeof(cl_platform_id) * platformCount);
+    clGetPlatformIDs(platformCount, platforms, NULL);
+    for (int i = 0; i < platformCount; i++) {
+        char platformName[30];
+        clGetPlatformInfo(platforms[i], CL_PLATFORM_NAME, 30, &platformName, NULL);
+        cout << "Platform " << platforms[i] << ": " << platformName << endl;
+    }
+
+    cl_platform_id iris_graphics = platforms[0];
+    free(platforms);
+
     cl_device_id device[1];
     cl_uint numDevices = 1;
-    clStatus = clGetDeviceIDs(NULL, CL_DEVICE_TYPE_GPU, numDevices, device, NULL);
+    clStatus = clGetDeviceIDs(iris_graphics, CL_DEVICE_TYPE_GPU, numDevices, device, NULL);
     CL_CHECK(clStatus, "clGetDeviceIDs");
 
     char dev_name[128];

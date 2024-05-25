@@ -1,5 +1,6 @@
 #include <CL/cl.h>
 #include <CL/cl_function_types.h>
+#include <CL/cl_icd.h>
 #include <stdbool.h>
 #include <stdio.h>
 
@@ -44,22 +45,22 @@ static bool initialized = false;
 // Returns 0 on success, 1 on failure
 bool rocl_init()
 {
-    libocl = LOAD_OCL();
-    if (libocl == NULL) {
-        return false;
-    } else {
-        initialized = true;
-        return true;
-    }
+    // libocl = LOAD_OCL();
+    // if (libocl == NULL) {
+    //     return false;
+    // } else {
+    //     initialized = true;
+    //     return true;
+    // }
 }
 
 // Frees `OpenCL.dll` / `libopencl.so`
 // Safe even if `rocl_init` failed
 void rocl_deinit()
 {
-    if (libocl != NULL) {
-        FREE_LIBRARY(libocl);
-    }
+    // if (libocl != NULL) {
+    //     FREE_LIBRARY(libocl);
+    // }
 }
 
 // Returns string description for OpenCL error code
@@ -208,48 +209,24 @@ const char* clErrorToString(cl_int err)
 }
 
 /* CL Dispatch Functions */
+/*
+static cl_icd_dispatch dispatch_table;
 
-typedef struct rocl_dispatch_table_s {
-    /* Platform API */
-    clGetPlatformIDs_fn _clGetPlatformIDs;
-    clGetPlatformInfo_fn _clGetPlatformInfo;
-    clGetDeviceIDs_fn _clGetDeviceIDs;
-    clGetDeviceInfo_fn _clGetDeviceInfo;
-    /* Context API */
-    clCreateContext_fn _clCreateContext;
-    clReleaseContext_fn _clReleaseContext;
-    /* Command Queue API */
-    clCreateCommandQueueWithProperties_fn _clCreateCommandQueueWithProperties;
-    // clReleaseCommandQueue_fn _clReleaseCommandQueue;
-    /* Program Object API */
-    clCreateProgramWithSource_fn _clCreateProgramWithSource;
-    // clReleaseProgram_fn _clReleaseProgram;
-    // clBuildProgram_fn _clBuildProgram;
-    // clGetProgramBuildInfo_fn _clGetProgramBuildInfo;
-    /* Kernel API */
-    // clCreateKernel_fn _clCreateKernel;
-    // clReleaseKernel_fn _clReleaseKernel;
-    // clSetKernelArg_fn _clSetKernelArg;
-    // clSetKernelArgSVMPointer_fn _clSetKernelArgSVMPointer;
-    // clEnqueueNDRangeKernel_fn _clEnqueueNDRangeKernel;
-} rocl_dispatch_table_t;
+#define DEFINE_CL_FUNCTION(ret_type, func_name, suffix, func_args_with_types...)    \
+    extern CL_API_ENTRY ret_type CL_API_CALL func_name(func_args_with_types) suffix \
+    {                                                                               \
+        if (dispatch_table.##func_name == NULL) {                                   \
+            dispatch_table.##func_name = GET_SYM(#func_name, func_name##_fn);       \
+            CHECK_DL_ERROR();                                                       \
+        }
 
-static rocl_dispatch_table_t dispatch_table = { 0 };
-
-/* Platform API */
-extern CL_API_ENTRY cl_int CL_API_CALL
-clGetPlatformIDs(
-    cl_uint num_entries,
-    cl_platform_id* platforms,
-    cl_uint* num_platforms) CL_API_SUFFIX__VERSION_1_0
-{
-    if (dispatch_table._clGetPlatformIDs == NULL) {
-        dispatch_table._clGetPlatformIDs = GET_SYM("clGetPlatformIDs", clGetPlatformIDs_fn);
-        CHECK_DL_ERROR();
+#define END_DEFINE_CL_FUNCTION(func_name, func_arg_names...) \
+    return dispatch_table.##func_name(func_arg_names);       \
     }
 
-    return dispatch_table._clGetPlatformIDs(num_entries, platforms, num_platforms);
-}
+// Platform API
+DEFINE_CL_FUNCTION(cl_int, clGetPlatformIDs, CL_API_SUFFIX__VERSION_1_0, cl_uint num_entries, cl_platform_id* platforms, cl_uint* num_platforms)
+END_DEFINE_CL_FUNCTION(clGetPlatformIDs, num_entries, platforms, num_platforms)
 
 extern CL_API_ENTRY cl_int CL_API_CALL
 clGetPlatformInfo(
@@ -299,7 +276,7 @@ clGetDeviceInfo(
     return dispatch_table._clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
 }
 
-/* Context API */
+// Context API
 extern CL_API_ENTRY cl_context CL_API_CALL
 clCreateContext(const cl_context_properties* properties,
     cl_uint num_devices,
@@ -330,7 +307,7 @@ clReleaseContext(cl_context context) CL_API_SUFFIX__VERSION_1_0
     return dispatch_table._clReleaseContext(context);
 }
 
-/* Command Queue API */
+// Command Queue API
 
 // Requires OpenCL 2.0 or higher.
 // Check before calling or the program will crash.
@@ -348,6 +325,8 @@ clCreateCommandQueueWithProperties(cl_context context,
     return dispatch_table._clCreateCommandQueueWithProperties(context, device, properties, errcode_ret);
 }
 
+// Program Object API
+
 extern CL_API_ENTRY cl_program CL_API_CALL
 clCreateProgramWithSource(cl_context context,
     cl_uint count,
@@ -362,3 +341,4 @@ clCreateProgramWithSource(cl_context context,
 
     return dispatch_table._clCreateProgramWithSource(context, count, strings, lengths, errcode_ret);
 }
+*/

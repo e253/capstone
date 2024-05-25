@@ -16,6 +16,10 @@
             .url = "https://github.com/KhronosGroup/OpenCL-Headers/archive/refs/tags/v2023.12.14.tar.gz",
             .hash = "1220694f71bac503053cb4746b73e3e61a7392565200de46decfd74a23818b54c287",
         },
+        .ocl_icd = .{
+            .url = "https://github.com/KhronosGroup/OpenCL-ICD-Loader/archive/refs/tags/v2024.05.08.tar.gz",
+            .hash = "122094ab49ec628c28a96be6476f386a27b13de464d832bbc6d4f8681d2de1da0eea",
+        }
     }, 
     .paths = .{ 
         "build.zig", 

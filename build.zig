@@ -22,15 +22,76 @@ pub fn build(b: *std.Build) void {
     const cl_headers_upstream = b.dependency("cl_headers_upstream", .{});
 
     // build rocl
-    const rocl = b.addStaticLibrary(.{
-        .name = "rocl",
+    // const rocl = b.addStaticLibrary(.{
+    //     .name = "rocl",
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // rocl.addCSourceFiles(.{ .files = &.{"src/rocl.c"}, .flags = &.{"-DCL_TARGET_OPENCL_VERSION=300"} });
+    // rocl.linkLibC();
+    // rocl.addIncludePath(cl_headers_upstream.path(""));
+    // b.installArtifact(rocl);
+
+    // build OCL ICD
+    const ocl_icd_upstream = b.dependency("ocl_icd", .{});
+    const opencl = b.addStaticLibrary(.{
+        .name = "OpenCL",
         .target = target,
         .optimize = optimize,
     });
-    rocl.addCSourceFiles(.{ .files = &.{"src/rocl.c"}, .flags = &.{"-DCL_TARGET_OPENCL_VERSION=300"} });
-    rocl.linkLibC();
-    rocl.addIncludePath(cl_headers_upstream.path(""));
-    b.installArtifact(rocl);
+    const flags = [_][]const u8{
+        "-DCL_TARGET_OPENCL_VERSION=300",
+        "-DCL_NO_NON_ICD_DISPATCH_EXTENSION_PROTOTYPES",
+        "-DOPENCL_ICD_LOADER_VERSION_MAJOR=3",
+        "-DOPENCL_ICD_LOADER_VERSION_MINOR=0",
+        "-DOPENCL_ICD_LOADER_VERSION_REV=6",
+    };
+    opencl.addCSourceFiles(.{
+        .root = ocl_icd_upstream.path("loader"),
+        .files = &.{
+            "icd.c",
+            "icd_dispatch.c",
+            "icd_dispatch_generated.c",
+        },
+        .flags = &flags,
+    });
+    if (target.result.os.tag == .windows) {
+        opencl.addCSourceFiles(.{
+            .root = ocl_icd_upstream.path("loader"),
+            .files = &.{
+                "windows/icd_windows.c",
+                "windows/icd_windows_dxgk.c",
+                "windows/icd_windows_envvars.c",
+                "windows/icd_windows_hkr.c",
+                "windows/icd_windows_apppackage.c",
+            },
+            .flags = &flags,
+        });
+        opencl.linkSystemLibrary("cfgmgr32");
+        opencl.linkSystemLibrary("Ole32"); // runtimeobject
+    } else if (target.result.os.tag == .linux) {
+        opencl.addCSourceFiles(.{
+            .root = ocl_icd_upstream.path("loader"),
+            .files = &.{
+                "linux/icd_linux.c",
+                "linux/icd_linux_envvars.c",
+            },
+            .flags = &flags,
+        });
+        const icd_config_header = b.addConfigHeader(.{
+            .style = .blank,
+            .include_path = "icd_cmake_config.h",
+        }, .{
+            // we know this becuase musl libc linked by zig provides these functions.
+            .HAVE_SECURE_GETENV = true,
+            .HAVE___SECURE_GETENV = true,
+        });
+        opencl.addConfigHeader(icd_config_header);
+    }
+    opencl.addIncludePath(cl_headers_upstream.path(""));
+    opencl.addIncludePath(ocl_icd_upstream.path("loader"));
+    opencl.linkLibC();
+    b.installArtifact(opencl);
 
     // ===== test_ref ======
     {
@@ -104,12 +165,13 @@ pub fn build(b: *std.Build) void {
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(gtest);
-        if (target.result.os.tag == .windows) {
-            exe.addLibraryPath(.{ .path = "C:\\Windows\\System32" });
-            exe.linkSystemLibrary2("opencl", .{ .preferred_link_mode = .dynamic });
-        } else {
-            exe.linkSystemLibrary("OpenCL");
-        }
+        // if (target.result.os.tag == .windows) {
+        //     exe.addLibraryPath(.{ .path = "C:\\Windows\\System32" });
+        //     exe.linkSystemLibrary2("opencl", .{ .preferred_link_mode = .dynamic });
+        // } else {
+        //     exe.linkSystemLibrary("OpenCL");
+        // }
+        exe.linkLibrary(opencl);
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
@@ -139,7 +201,7 @@ pub fn build(b: *std.Build) void {
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(gtest);
-        exe.linkLibrary(rocl);
+        exe.linkLibrary(opencl);
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
@@ -165,12 +227,13 @@ pub fn build(b: *std.Build) void {
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(gtest);
-        if (target.result.os.tag == .windows) {
-            exe.addLibraryPath(.{ .path = "C:\\Windows\\System32" });
-            exe.linkSystemLibrary2("opencl", .{ .preferred_link_mode = .dynamic });
-        } else {
-            exe.linkSystemLibrary("OpenCL");
-        }
+        // if (target.result.os.tag == .windows) {
+        //     exe.addLibraryPath(.{ .path = "C:\\Windows\\System32" });
+        //     exe.linkSystemLibrary2("opencl", .{ .preferred_link_mode = .dynamic });
+        // } else {
+        //     exe.linkSystemLibrary("OpenCL");
+        // }
+        exe.linkLibrary(opencl);
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);

@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
 
     const argparse = b.dependency("argparse", .{});
     const cl_headers_upstream = b.dependency("cl_headers_upstream", .{});
+    const cl_hpp = b.dependency("cl_hpp", .{});
 
     // build rocl
     // const rocl = b.addStaticLibrary(.{
@@ -93,6 +94,30 @@ pub fn build(b: *std.Build) void {
     opencl.linkLibC();
     b.installArtifact(opencl);
 
+    // ==== build zig spirv kernel (broken) ====
+    // https://github.com/Snektron/zig-spirv-test-executor/blob/main/build.zig
+    // const vec_add_kernel = b.addStaticLibrary(.{
+    //     .name = "VectorAdd",
+    //     .root_source_file = .{ .path = "src/kernels/vector_add.zig" },
+    //     .target = b.resolveTargetQuery(.{
+    //         .cpu_arch = .spirv64,
+    //         .os_tag = .opencl,
+    //         .abi = .none,
+    //         .cpu_features_add = std.Target.spirv.featureSet(&.{ .Int64, .Int16, .Int8, .Float64, .Float16 }),
+    //     }),
+    //     .optimize = .ReleaseFast,
+    // });
+    // b.installArtifact(vec_add_kernel);
+
+    // ===== collect cl_kernels into static library =====
+    const cl_src = b.addStaticLibrary(.{
+        .name = "clsrc",
+        .root_source_file = .{ .path = "src/kernels/cl_src.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(cl_src);
+
     // ===== test_ref ======
     {
         const exe = b.addExecutable(.{
@@ -162,6 +187,7 @@ pub fn build(b: *std.Build) void {
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
         exe.addIncludePath(cl_headers_upstream.path(""));
+        exe.addIncludePath(cl_hpp.path("include"));
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(gtest);
@@ -172,6 +198,7 @@ pub fn build(b: *std.Build) void {
         //     exe.linkSystemLibrary("OpenCL");
         // }
         exe.linkLibrary(opencl);
+        exe.linkLibrary(cl_src);
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
@@ -224,6 +251,7 @@ pub fn build(b: *std.Build) void {
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
         exe.addIncludePath(cl_headers_upstream.path(""));
+        exe.addIncludePath(cl_hpp.path("include"));
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(gtest);
@@ -234,6 +262,7 @@ pub fn build(b: *std.Build) void {
         //     exe.linkSystemLibrary("OpenCL");
         // }
         exe.linkLibrary(opencl);
+        exe.linkLibrary(cl_src);
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);

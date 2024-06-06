@@ -4,6 +4,7 @@
 #endif
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
+#include <CL/opencl.hpp>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -28,17 +29,12 @@ static cl_context context;
 static cl_kernel vec_add_kernel;
 static cl_kernel q4f32s_qi8f32s_egemv_kernel;
 static cl_kernel f32_qi8f32s_kernel;
+static cl::Program program;
+static bool program_built;
 static cl_command_queue queue;
 
 #define CL_SRC(...) #__VA_ARGS__
 const string cl_src = CL_SRC(
-
-    __kernel void vec_add(__global const float* a, __global const float* b, __global float* c, const int n) {
-        int i = get_global_id(0);
-        if (i < n) {
-            c[i] = a[i] + b[i];
-        }
-    }
 
     inline char clamp(float x) {
         return (char)(x > 127.0f ? 127 : (x < -128.0f ? -128 : round(x)));
@@ -226,6 +222,55 @@ void f32_qi8f32s(float* in, int8_t* out, float* out_s, int n, int n_threads)
 
     clStatus = clFinish(queue);
     CL_CHECK(clStatus, "clFinish - f32_qi8f32s")
+}
+
+extern const char* _cl_src;
+
+void build_kernels()
+{
+    // std::string cl_src;
+    // std::string vector_add = {
+    // #include "./kernels/vector_add.cl"
+    // };
+    // cl_src.append(vector_add);
+
+    program = cl::Program(_cl_src);
+    try {
+        program.build("-cl-std=CL2.0 -cl-mad-enable -cl-fast-relaxed-math");
+    } catch (...) {
+        // Print build info for all devices
+        cl_int buildErr = CL_SUCCESS;
+        auto buildInfo = program.getBuildInfo<CL_PROGRAM_BUILD_LOG>(&buildErr);
+        for (auto& pair : buildInfo) {
+            std::cerr << pair.second << std::endl
+                      << std::endl;
+        }
+
+        exit(1);
+    }
+
+    program_built = true;
+}
+
+void vector_add(float* a, float* b, float* c, int n, cl_command_queue* c_queue, cl_event* c_ev)
+{
+
+    cl::CommandQueue queue = cl::CommandQueue(*c_queue);
+    cl::Device device = cl::Device(queue.getInfo<CL_QUEUE_DEVICE>());
+    if (!program_built) {
+        build_kernels();
+    }
+
+    cl::Kernel kernel = cl::Kernel(program, "vec_add");
+
+    kernel.setArg(0, a);
+    kernel.setArg(1, b);
+    kernel.setArg(2, c);
+    kernel.setArg(3, n);
+
+    cl::Event ev = cl::Event(*c_ev);
+    // there should be more checks like this for stability -> https://github.com/CNugteren/CLBlast/blob/master/src/routines/common.cpp
+    queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(n), cl::NullRange, nullptr, &ev);
 }
 
 // DO NOT CALL FROM MULTIPLE THREADS!
@@ -1122,28 +1167,32 @@ int main(int argc, char** argv)
 {
     cl_int clStatus;
 
-    // make sure a device exists
-    cl_uint platformCount;
-    clStatus = clGetPlatformIDs(0, NULL, &platformCount);
-    CL_CHECK(clStatus, "clPlatformIDs");
-    if (platformCount == 0) {
-        cout << "No OpenCL Platforms Found ... Quitting" << endl;
-        exit(0);
+    std::vector<cl::Platform> platforms;
+    cl::Platform::get(&platforms);
+    cl::Platform iris_graphics;
+    for (auto& p : platforms) {
+        cout << "Platform[" << p() << "] : " << p.getInfo<CL_PLATFORM_NAME>() << endl;
+        if (p.getInfo<CL_PLATFORM_NAME>().find("Intel(R) OpenCL HD Graphics") != string::npos) {
+            iris_graphics = p;
+        }
+        std::vector<cl::Device> devices;
+        p.getDevices(CL_DEVICE_TYPE_GPU, &devices);
+        if (devices.size() == 0)
+            continue;
+        cout << "\t";
+        for (auto& d : devices) {
+            cout << "Device[" << d() << "] : " << d.getInfo<CL_DEVICE_NAME>() << ", ";
+        }
+        cout << endl;
     }
-    cl_platform_id* platforms = (cl_platform_id*)malloc(sizeof(cl_platform_id) * platformCount);
-    clGetPlatformIDs(platformCount, platforms, NULL);
-    for (int i = 0; i < platformCount; i++) {
-        char platformName[30];
-        clGetPlatformInfo(platforms[i], CL_PLATFORM_NAME, 30, &platformName, NULL);
-        cout << "Platform " << platforms[i] << ": " << platformName << endl;
+    if (iris_graphics() == 0) {
+        cout << "Tests Search For 'Intel(R) OpenCL HD Graphics' OpenCL platform which was not found" << endl;
+        exit(1);
     }
-
-    cl_platform_id iris_graphics = platforms[0];
-    free(platforms);
 
     cl_device_id device[1];
     cl_uint numDevices = 1;
-    clStatus = clGetDeviceIDs(iris_graphics, CL_DEVICE_TYPE_GPU, numDevices, device, NULL);
+    clStatus = clGetDeviceIDs(iris_graphics(), CL_DEVICE_TYPE_GPU, numDevices, device, NULL);
     CL_CHECK(clStatus, "clGetDeviceIDs");
 
     char dev_name[128];
@@ -1190,8 +1239,8 @@ int main(int argc, char** argv)
         exit(1);
     }
 
-    vec_add_kernel = clCreateKernel(p, "vec_add", &clStatus);
-    CL_CHECK(clStatus, "clCreateKernel - vec_add");
+    // vec_add_kernel = clCreateKernel(p, "vec_add", &clStatus);
+    // CL_CHECK(clStatus, "clCreateKernel - vec_add");
     q4f32s_qi8f32s_egemv_kernel = clCreateKernel(p, "q4f32s_qi8f32s_egemv_kernel", &clStatus);
     CL_CHECK(clStatus, "clCreateKernel - q4f32s_qi8f32s_egemv_kernel");
     f32_qi8f32s_kernel = clCreateKernel(p, "f32_qi8f32s", &clStatus);
@@ -1215,810 +1264,3 @@ int main(int argc, char** argv)
     return test_result;
 #endif
 }
-
-/*
-void test_512x512_input()
-{
-    const int m = 512;
-    const int n = 512;
-
-    uint8_t* w = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / 2, 64);
-    float* s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE / 2, 64);
-    int8_t* in = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, n * sizeof(float), 64);
-    float* in_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, n / QBLOCK_SIZE * sizeof(float), 64);
-    int8_t* out = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m, 64);
-    float* out_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m / QBLOCK_SIZE * sizeof(float), 64);
-
-    // 1 - Trivial
-    {
-        SVMMAP(queue, w, m * n / 2);
-        BROADCAST(w, m * n / 2, 0x55);
-        SVMUNMAP(queue, w);
-
-        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
-        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
-        SVMUNMAP(queue, s);
-
-        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
-        SVMUNMAP(queue, z);
-
-        SVMMAP(queue, in, n);
-        BROADCAST(in, n, 2);
-        SVMUNMAP(queue, in);
-
-        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
-        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
-        SVMUNMAP(queue, in_scales);
-
-        SVMMAP(queue, out, m);
-        memset(out, 0, m);
-        SVMUNMAP(queue, out);
-
-        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
-        BROADCAST(out_scales, m / QBLOCK_SIZE, 81.92f);
-        SVMUNMAP(queue, out_scales);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        SVMMAP(queue, out, m);
-        bool passed = true;
-        for (int i = 0; i < m; i++) {
-            if (out[i] != 100) {
-                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
-                passed = false;
-            }
-        }
-        SVMUNMAP(queue, out);
-        if (passed) {
-            cout << "Test 1 Passed!" << endl;
-        } else {
-            cout << "Test 1 Failed!" << endl;
-        }
-    }
-
-    // 2 - unique weight scales, ensure proper loading
-    {
-        SVMMAP(queue, w, m * n / 2);
-        BROADCAST(w, m * n / 2, 0x55);
-        SVMUNMAP(queue, w);
-
-        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
-        for (int out_qblock = 0; out_qblock < m / QBLOCK_SIZE; out_qblock++) {
-            for (int in_qblock = 0; in_qblock < n / QBLOCK_SIZE; in_qblock++) {
-                int qblock_id = out_qblock * n / QBLOCK_SIZE + in_qblock;
-                for (int el = 0; el < QBLOCK_SIZE; el++) {
-                    s[qblock_id * QBLOCK_SIZE + el] = (float)(el + 1);
-                }
-            }
-        }
-        SVMUNMAP(queue, s);
-
-        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
-        SVMUNMAP(queue, z);
-
-        SVMMAP(queue, in, n);
-        BROADCAST(in, n, 2);
-        SVMUNMAP(queue, in);
-
-        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
-        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
-        SVMUNMAP(queue, in_scales);
-
-        SVMMAP(queue, out, m);
-        memset(out, 0, m);
-        SVMUNMAP(queue, out);
-
-        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
-        BROADCAST(out_scales, m / QBLOCK_SIZE, 5242.88f);
-        SVMUNMAP(queue, out_scales);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        SVMMAP(queue, out, m);
-        bool passed = true;
-        for (int i = 0; i < m; i++) {
-            if (out[i] != round((i % QBLOCK_SIZE + 1) * 4096 / 5242.88f)) {
-                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
-                passed = false;
-            }
-        }
-        SVMUNMAP(queue, out);
-        if (passed) {
-            cout << "Test 2 Passed!" << endl;
-        } else {
-            cout << "Test 2 Failed!" << endl;
-        }
-    }
-
-    // 3 - trivial, but different input scales
-    {
-        SVMMAP(queue, w, m * n / 2);
-        BROADCAST(w, m * n / 2, 0x55);
-        SVMUNMAP(queue, w);
-
-        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
-        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
-        SVMUNMAP(queue, s);
-
-        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
-        SVMUNMAP(queue, z);
-
-        SVMMAP(queue, in, n);
-        BROADCAST(in, n, 2);
-        SVMUNMAP(queue, in);
-
-        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
-        for (int i = 0; i < n / QBLOCK_SIZE; i++) {
-            in_scales[i] = (float)(i + 1);
-        }
-        SVMUNMAP(queue, in_scales);
-
-        SVMMAP(queue, out, m);
-        memset(out, 0, m);
-        SVMUNMAP(queue, out);
-
-        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
-        BROADCAST(out_scales, m / QBLOCK_SIZE, 204.8f);
-        SVMUNMAP(queue, out_scales);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        SVMMAP(queue, out, m);
-        bool passed = true;
-        for (int i = 0; i < m; i++) {
-            if (out[i] != 100) {
-                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
-                passed = false;
-            }
-        }
-        SVMUNMAP(queue, out);
-        if (passed) {
-            cout << "Test 3 Passed!" << endl;
-        } else {
-            cout << "Test 3 Failed!" << endl;
-        }
-    }
-
-    // 4 trivial - but 0 values after adjustment
-    {
-        SVMMAP(queue, w, m * n / 2);
-        BROADCAST(w, m * n / 2, 0x00);
-        SVMUNMAP(queue, w);
-
-        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
-        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
-        SVMUNMAP(queue, s);
-
-        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x44);
-        SVMUNMAP(queue, z);
-
-        SVMMAP(queue, in, n);
-        BROADCAST(in, n, 2);
-        SVMUNMAP(queue, in);
-
-        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
-        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
-        SVMUNMAP(queue, in_scales);
-
-        SVMMAP(queue, out, m);
-        memset(out, 0, m);
-        SVMUNMAP(queue, out);
-
-        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
-        BROADCAST(out_scales, m / QBLOCK_SIZE, 81.92f);
-        SVMUNMAP(queue, out_scales);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        SVMMAP(queue, out, m);
-        bool passed = true;
-        for (int i = 0; i < m; i++) {
-            if (out[i] != -100) {
-                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
-                passed = false;
-            }
-        }
-        SVMUNMAP(queue, out);
-        if (passed) {
-            cout << "Test 4 Passed!" << endl;
-        } else {
-            cout << "Test 4 Failed!" << endl;
-        }
-    }
-
-    // 5 - Trivial, but the out scale is too small to prevent int8 overflow
-    {
-        SVMMAP(queue, w, m * n / 2);
-        BROADCAST(w, m * n / 2, 0x00);
-        SVMUNMAP(queue, w);
-
-        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
-        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
-        SVMUNMAP(queue, s);
-
-        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x44);
-        SVMUNMAP(queue, z);
-
-        SVMMAP(queue, in, n);
-        BROADCAST(in, n, 2);
-        SVMUNMAP(queue, in);
-
-        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
-        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
-        SVMUNMAP(queue, in_scales);
-
-        SVMMAP(queue, out, m);
-        memset(out, 0, m);
-        SVMUNMAP(queue, out);
-
-        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
-        BROADCAST(out_scales, m / QBLOCK_SIZE, 1.0f);
-        SVMUNMAP(queue, out_scales);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        SVMMAP(queue, out, m);
-        bool passed = true;
-        for (int i = 0; i < m; i++) {
-            if (out[i] != -128) {
-                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
-                passed = false;
-            }
-        }
-        SVMUNMAP(queue, out);
-        if (passed) {
-            cout << "Test 5 Passed!" << endl;
-        } else {
-            cout << "Test 5 Failed!" << endl;
-        }
-    }
-
-    // 6 - alternating weights along the output dimension
-    {
-        SVMMAP(queue, w, m * n / 2);
-        for (int row = 0; row < m; row++) { // row idx
-            for (int col = 0; col < n / 2; col++) { // col idx
-                w[row * n / 2 + col] = (row % 2 == 0) ? 0x33 : 0x55;
-            }
-        }
-        SVMUNMAP(queue, w);
-
-        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
-        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
-        SVMUNMAP(queue, s);
-
-        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
-        BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
-        SVMUNMAP(queue, z);
-
-        SVMMAP(queue, in, n);
-        BROADCAST(in, n, 2);
-        SVMUNMAP(queue, in);
-
-        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
-        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
-        SVMUNMAP(queue, in_scales);
-
-        SVMMAP(queue, out, m);
-        memset(out, 0, m);
-        SVMUNMAP(queue, out);
-
-        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
-        BROADCAST(out_scales, m / QBLOCK_SIZE, 81.92f);
-        SVMUNMAP(queue, out_scales);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        SVMMAP(queue, out, m);
-        bool passed = true;
-        for (int i = 0; i < m; i++) {
-            if (out[i] != (i % 2 == 0 ? 50 : 100)) {
-                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
-                passed = false;
-            }
-        }
-        SVMUNMAP(queue, out);
-
-        if (passed) {
-            cout << "Test 6 Passed!" << endl;
-        } else {
-            cout << "Test 6 Failed!" << endl;
-        }
-    }
-
-    // 7 - alternating zeros along out dim
-    {
-        SVMMAP(queue, w, m * n / 2);
-        BROADCAST(w, m * n / 2, 0x11);
-        SVMUNMAP(queue, w);
-
-        SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
-        BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
-        SVMUNMAP(queue, s);
-
-        SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
-        for (int out_qblock = 0; out_qblock < m / QBLOCK_SIZE; out_qblock++) {
-            for (int in_qblock = 0; in_qblock < n / QBLOCK_SIZE; in_qblock++) {
-                int qblock_id = out_qblock * n / QBLOCK_SIZE + in_qblock;
-                for (int el = 0; el < QBLOCK_SIZE; el++) {
-                    z[qblock_id * QBLOCK_SIZE / 2 + el] = (el % 2 == 0) ? 0x11 : 0x33;
-                }
-            }
-        }
-        SVMUNMAP(queue, z);
-
-        SVMMAP(queue, in, n);
-        BROADCAST(in, n, 2);
-        SVMUNMAP(queue, in);
-
-        SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
-        BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
-        SVMUNMAP(queue, in_scales);
-
-        SVMMAP(queue, out, m);
-        memset(out, 0, m);
-        SVMUNMAP(queue, out);
-
-        SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
-        BROADCAST(out_scales, m / QBLOCK_SIZE, 40.96f);
-        SVMUNMAP(queue, out_scales);
-
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-        SVMMAP(queue, out, m);
-        bool passed = true;
-        for (int i = 0; i < m; i += 4) {
-            if (out[i] != 0 || out[i + 1] != 0 || out[i + 2] != -100 || out[i + 3] != -100) {
-                cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
-                cout << "Error: out[" << i + 1 << "] = " << (int)out[i + 1] << endl;
-                cout << "Error: out[" << i + 2 << "] = " << (int)out[i + 2] << endl;
-                cout << "Error: out[" << i + 3 << "] = " << (int)out[i + 3] << endl;
-                passed = false;
-            }
-        }
-        SVMUNMAP(queue, out);
-
-        if (passed) {
-            cout << "Test 7 Passed!" << endl;
-        } else {
-            cout << "Test 7 Failed!" << endl;
-        }
-    }
-
-    clSVMFree(context, w);
-    clSVMFree(context, s);
-    clSVMFree(context, z);
-    clSVMFree(context, in);
-    clSVMFree(context, in_scales);
-    clSVMFree(context, out);
-    clSVMFree(context, out_scales);
-}
-
-void test_dim_fuzz()
-{
-    cout << "### Dimension Fuzzing ###" << endl;
-
-    uint8_t* w = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 * 32768 / 2, 64);
-    float* s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 * 32768 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 * 32768 / QBLOCK_SIZE / 2, 64);
-    int8_t* in = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 * sizeof(float), 64);
-    float* in_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 / QBLOCK_SIZE * sizeof(float), 64);
-    int8_t* out = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768, 64);
-    float* out_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 32768 / QBLOCK_SIZE * sizeof(float), 64);
-
-    for (int m = 512; m <= 32768; m += 512) {
-        for (int n = 512; n <= 32768; n += 512) {
-
-            SVMMAP(queue, w, m * n / 2);
-            BROADCAST(w, m * n / 2, 0x55);
-            SVMUNMAP(queue, w);
-
-            SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
-            BROADCAST(s, m * n / QBLOCK_SIZE, 2.0f);
-            SVMUNMAP(queue, s);
-
-            SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
-            BROADCAST(z, m * n / QBLOCK_SIZE / 2, 0x11);
-            SVMUNMAP(queue, z);
-
-            SVMMAP(queue, in, n);
-            BROADCAST(in, n, 2);
-            SVMUNMAP(queue, in);
-
-            SVMMAP(queue, in_scales, n / QBLOCK_SIZE);
-            BROADCAST(in_scales, n / QBLOCK_SIZE, 1.0f);
-            SVMUNMAP(queue, in_scales);
-
-            SVMMAP(queue, out, m);
-            memset(out, 0, m);
-            SVMUNMAP(queue, out);
-
-            SVMMAP(queue, out_scales, m / QBLOCK_SIZE);
-            float _os = (float)(n * 2 * 2 * 4) / 100.0f;
-            BROADCAST(out_scales, m / QBLOCK_SIZE, _os);
-            SVMUNMAP(queue, out_scales);
-
-            q4f32s_qi8f32s_egemv_offline(w, s, z, in, in_scales, out, out_scales, m, n);
-
-            SVMMAP(queue, out, m);
-            bool passed = true;
-            for (int i = 0; i < m; i++) {
-                if (out[i] != 100) {
-                    cout << "Error: out[" << i << "] = " << (int)out[i] << endl;
-                    passed = false;
-                }
-            }
-            SVMUNMAP(queue, out);
-
-            if (!passed) {
-                cout << "Fuzz Test 1 Failed for dim: " << m << ", " << n << endl;
-                cout << "Output scale: " << _os << endl;
-                cout << "Expected: " << 100 << endl;
-                exit(0);
-            }
-        }
-        cout << "Fuzz Test 1 Passed for dim: " << m << ", ?" << endl;
-    }
-
-    clSVMFree(context, w);
-    clSVMFree(context, s);
-    clSVMFree(context, z);
-    clSVMFree(context, in);
-    clSVMFree(context, in_scales);
-    clSVMFree(context, out);
-    clSVMFree(context, out_scales);
-}
-
-void random_init_array(char* arr, int len)
-{
-    for (int i = 0; i < len; i++) {
-        arr[i] = rand() % 256;
-    }
-}
-
-void bench_llama_up_proj()
-{
-    cout << "Benchmarking LLAMA Up Proj ..." << endl;
-    cout << "Hidden Dim: 14336, Dim: 4096" << endl;
-    cout << endl;
-
-    int m = 14336;
-    int n = 4096;
-
-    uint8_t* w = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / 2, 64);
-    float* s = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m * n / QBLOCK_SIZE / 2, 64);
-    int8_t* in = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, n, 64);
-    float* input_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, n / QBLOCK_SIZE * sizeof(float), 64);
-    int8_t* out = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, m, 64);
-    float* output_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, m / QBLOCK_SIZE * sizeof(float), 64);
-    SVMMAP(queue, w, m * n / 2);
-    SVMMAP(queue, s, m * n / QBLOCK_SIZE * sizeof(float));
-    SVMMAP(queue, z, m * n / QBLOCK_SIZE / 2);
-    SVMMAP(queue, in, n);
-    SVMMAP(queue, input_scales, n / QBLOCK_SIZE * sizeof(float));
-    random_init_array((char*)w, m * n / 2);
-    random_init_array((char*)s, m * n / QBLOCK_SIZE * sizeof(float));
-    random_init_array((char*)z, m * n / QBLOCK_SIZE / 2);
-    random_init_array((char*)in, n);
-    random_init_array((char*)input_scales, n / QBLOCK_SIZE * sizeof(float));
-    SVMUNMAP(queue, w);
-    SVMUNMAP(queue, s);
-    SVMUNMAP(queue, z);
-    SVMUNMAP(queue, in);
-    SVMUNMAP(queue, input_scales);
-
-    // ==== bench ====
-    const int NIT = 200;
-    auto start = chrono::high_resolution_clock::now();
-    for (int i = 0; i < NIT; i++) {
-        q4f32s_qi8f32s_egemv_offline(w, s, z, in, input_scales, out, output_scales, m, n);
-    }
-    auto end = chrono::high_resolution_clock::now();
-
-    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-    cout << "total: " << sec << " (s)" << endl;
-    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
-
-    uint64_t flops_processed = 4096 * 14336 * 2 * (uint64_t)NIT;
-    double flops_per_sec = flops_processed / sec;
-    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
-    cout << endl;
-
-    clSVMFree(context, w);
-    clSVMFree(context, s);
-    clSVMFree(context, z);
-    clSVMFree(context, in);
-    clSVMFree(context, input_scales);
-    clSVMFree(context, out);
-    clSVMFree(context, output_scales);
-}
-
-void bench_llama_ffn()
-{
-    // down proj 4096x14336
-    // gate_proj 14336x4096
-    // up_proj 14336x4096
-    // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
-    // we do not do the elementwise multiply
-    // we do not apply SwiGLU non-linearity in the hidden_dim
-    // just the matmuls. skips 14k ops out of 176M total (4096 * 14336 * 3)
-    cout << "Benchmarking LLAMA FFN ..." << endl;
-    cout << "down_proj @ (up_proj @ x * gate_proj @ x)" << endl;
-    cout << "Hidden Dim: 14436, Dim: 4096" << endl;
-    cout << endl;
-
-    // ==== activations ====
-    int8_t* io = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096, 64);
-    float* input_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 / QBLOCK_SIZE * sizeof(float), 64);
-    float* output_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 / QBLOCK_SIZE * sizeof(float), 64);
-    SVMMAP(queue, io, 4096);
-    SVMMAP(queue, input_scales, 4096 / QBLOCK_SIZE * sizeof(float));
-    SVMMAP(queue, output_scales, 4096 / QBLOCK_SIZE * sizeof(float));
-    random_init_array((char*)io, 4096);
-    random_init_array((char*)input_scales, 4096 / QBLOCK_SIZE);
-    random_init_array((char*)output_scales, 4096 / QBLOCK_SIZE);
-    SVMUNMAP(queue, io);
-    SVMUNMAP(queue, input_scales);
-    SVMUNMAP(queue, output_scales);
-
-    // ==== up_proj ====
-    uint8_t* w_up_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / 2, 64);
-    float* s_up_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z_up_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / QBLOCK_SIZE / 2, 64);
-    int8_t* out_up_proj = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336, 64);
-    float* out_scales_up_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    SVMMAP(queue, w_up_proj, 14336 * 4096 / 2);
-    SVMMAP(queue, s_up_proj, 14336 * 4096 / QBLOCK_SIZE * sizeof(float));
-    SVMMAP(queue, z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
-    SVMMAP(queue, out_up_proj, 14336);
-    SVMMAP(queue, out_scales_up_proj, 14336 / QBLOCK_SIZE * sizeof(float));
-    random_init_array((char*)w_up_proj, 14336 * 4096 / 2);
-    random_init_array((char*)s_up_proj, 14336 * 4096 / QBLOCK_SIZE);
-    random_init_array((char*)z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
-    random_init_array((char*)out_up_proj, 14336);
-    random_init_array((char*)out_scales_up_proj, 14336 / QBLOCK_SIZE);
-    SVMUNMAP(queue, w_up_proj);
-    SVMUNMAP(queue, s_up_proj);
-    SVMUNMAP(queue, z_up_proj);
-    SVMUNMAP(queue, out_up_proj);
-    SVMUNMAP(queue, out_scales_up_proj);
-
-    // ==== gate_proj ====
-    uint8_t* w_gate_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / 2, 64);
-    float* s_gate_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z_gate_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE / 2, 64);
-    int8_t* out_gate_proj = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336, 64);
-    float* out_scales_gate_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    SVMMAP(queue, w_gate_proj, 4096 * 14336 / 2);
-    SVMMAP(queue, s_gate_proj, 4096 * 14336 / QBLOCK_SIZE * sizeof(float));
-    SVMMAP(queue, z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-    SVMMAP(queue, out_gate_proj, 14336);
-    SVMMAP(queue, out_scales_gate_proj, 14336 / QBLOCK_SIZE * sizeof(float));
-    random_init_array((char*)w_gate_proj, 4096 * 14336 / 2);
-    random_init_array((char*)s_gate_proj, 4096 * 14336 / QBLOCK_SIZE);
-    random_init_array((char*)z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-    random_init_array((char*)out_gate_proj, 14336);
-    random_init_array((char*)out_scales_gate_proj, 14336 / QBLOCK_SIZE);
-    SVMUNMAP(queue, w_gate_proj);
-    SVMUNMAP(queue, s_gate_proj);
-    SVMUNMAP(queue, z_gate_proj);
-    SVMUNMAP(queue, out_gate_proj);
-    SVMUNMAP(queue, out_scales_gate_proj);
-
-    // ==== down_proj ====
-    uint8_t* w_down_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / 2, 64);
-    float* s_down_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z_down_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE / 2, 64);
-    SVMMAP(queue, w_down_proj, 4096 * 14336 / 2);
-    SVMMAP(queue, s_down_proj, 4096 * 14336 / QBLOCK_SIZE * sizeof(float));
-    SVMMAP(queue, z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-    random_init_array((char*)w_down_proj, 4096 * 14336 / 2);
-    random_init_array((char*)s_down_proj, 4096 * 14336 / QBLOCK_SIZE);
-    random_init_array((char*)z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-    SVMUNMAP(queue, w_down_proj);
-    SVMUNMAP(queue, s_down_proj);
-    SVMUNMAP(queue, z_down_proj);
-
-    // ==== bench ====
-    const int NIT = 200;
-    auto start = chrono::high_resolution_clock::now();
-    for (int i = 0; i < NIT; i++) {
-        // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
-        // up_proj @ x
-        q4f32s_qi8f32s_egemv_offline(
-            w_up_proj, s_up_proj, z_up_proj,
-            io, input_scales,
-            out_up_proj, out_scales_up_proj,
-            14336, 4096);
-
-        // gate_proj @ x
-        q4f32s_qi8f32s_egemv_offline(
-            w_gate_proj, s_gate_proj, z_gate_proj,
-            io, input_scales,
-            out_gate_proj, out_scales_gate_proj,
-            14336, 4096);
-
-        // down_proj @ up_proj_out
-        q4f32s_qi8f32s_egemv_offline(
-            w_down_proj, s_down_proj, z_down_proj,
-            out_up_proj, out_scales_up_proj,
-            io, output_scales,
-            4096, 14336);
-    }
-    auto end = chrono::high_resolution_clock::now();
-
-    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-    cout << "total: " << sec << " (s)" << endl;
-    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
-
-    uint64_t flops_processed = 4096 * 14336 * 6 * (uint64_t)NIT;
-    double flops_per_sec = flops_processed / sec;
-    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
-    cout << endl;
-
-    // ==== cleanup ====
-    clSVMFree(context, io);
-    clSVMFree(context, input_scales);
-    clSVMFree(context, w_up_proj);
-    clSVMFree(context, s_up_proj);
-    clSVMFree(context, z_up_proj);
-    clSVMFree(context, out_up_proj);
-    clSVMFree(context, out_scales_up_proj);
-    clSVMFree(context, w_gate_proj);
-    clSVMFree(context, s_gate_proj);
-    clSVMFree(context, z_gate_proj);
-    clSVMFree(context, out_gate_proj);
-    clSVMFree(context, out_scales_gate_proj);
-    clSVMFree(context, w_down_proj);
-    clSVMFree(context, s_down_proj);
-    clSVMFree(context, z_down_proj);
-}
-
-void test_throttle()
-{
-    // down proj 4096x14336
-    // gate_proj 14336x4096
-    // up_proj 14336x4096
-    // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
-    // we do not do the elementwise multiply
-    // we do not apply SwiGLU non-linearity in the hidden_dim
-    // just the matmuls. skips 14k ops out of 176M total (4096 * 14336 * 3)
-    cout << "Throttling iGPU with LLAMA FFN ..." << endl;
-    cout << "down_proj @ (up_proj @ x * gate_proj @ x)" << endl;
-    cout << "Hidden Dim: 14436, Dim: 4096" << endl;
-    cout << "Simulating a ~500 token generation" << endl;
-    cout << endl;
-
-    // ==== activations ====
-    int8_t* io = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096, 64);
-    float* input_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 / QBLOCK_SIZE * sizeof(float), 64);
-    float* output_scales = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 / QBLOCK_SIZE * sizeof(float), 64);
-    SVMMAP(queue, io, 4096);
-    SVMMAP(queue, input_scales, 4096 / QBLOCK_SIZE * sizeof(float));
-    SVMMAP(queue, output_scales, 4096 / QBLOCK_SIZE * sizeof(float));
-    random_init_array((char*)io, 4096);
-    random_init_array((char*)input_scales, 4096 / QBLOCK_SIZE);
-    random_init_array((char*)output_scales, 4096 / QBLOCK_SIZE);
-    SVMUNMAP(queue, io);
-    SVMUNMAP(queue, input_scales);
-    SVMUNMAP(queue, output_scales);
-
-    // ==== up_proj ====
-    uint8_t* w_up_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / 2, 64);
-    float* s_up_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z_up_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 * 4096 / QBLOCK_SIZE / 2, 64);
-    int8_t* out_up_proj = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336, 64);
-    float* out_scales_up_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    SVMMAP(queue, w_up_proj, 14336 * 4096 / 2);
-    SVMMAP(queue, s_up_proj, 14336 * 4096 / QBLOCK_SIZE * sizeof(float));
-    SVMMAP(queue, z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
-    SVMMAP(queue, out_up_proj, 14336);
-    SVMMAP(queue, out_scales_up_proj, 14336 / QBLOCK_SIZE * sizeof(float));
-    random_init_array((char*)w_up_proj, 14336 * 4096 / 2);
-    random_init_array((char*)s_up_proj, 14336 * 4096 / QBLOCK_SIZE);
-    random_init_array((char*)z_up_proj, 14336 * 4096 / QBLOCK_SIZE / 2);
-    random_init_array((char*)out_up_proj, 14336);
-    random_init_array((char*)out_scales_up_proj, 14336 / QBLOCK_SIZE);
-    SVMUNMAP(queue, w_up_proj);
-    SVMUNMAP(queue, s_up_proj);
-    SVMUNMAP(queue, z_up_proj);
-    SVMUNMAP(queue, out_up_proj);
-    SVMUNMAP(queue, out_scales_up_proj);
-
-    // ==== gate_proj ====
-    uint8_t* w_gate_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / 2, 64);
-    float* s_gate_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z_gate_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE / 2, 64);
-    int8_t* out_gate_proj = (int8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336, 64);
-    float* out_scales_gate_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    SVMMAP(queue, w_gate_proj, 4096 * 14336 / 2);
-    SVMMAP(queue, s_gate_proj, 4096 * 14336 / QBLOCK_SIZE * sizeof(float));
-    SVMMAP(queue, z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-    SVMMAP(queue, out_gate_proj, 14336);
-    SVMMAP(queue, out_scales_gate_proj, 14336 / QBLOCK_SIZE * sizeof(float));
-    random_init_array((char*)w_gate_proj, 4096 * 14336 / 2);
-    random_init_array((char*)s_gate_proj, 4096 * 14336 / QBLOCK_SIZE);
-    random_init_array((char*)z_gate_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-    random_init_array((char*)out_gate_proj, 14336);
-    random_init_array((char*)out_scales_gate_proj, 14336 / QBLOCK_SIZE);
-    SVMUNMAP(queue, w_gate_proj);
-    SVMUNMAP(queue, s_gate_proj);
-    SVMUNMAP(queue, z_gate_proj);
-    SVMUNMAP(queue, out_gate_proj);
-    SVMUNMAP(queue, out_scales_gate_proj);
-
-    // ==== down_proj ====
-    uint8_t* w_down_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / 2, 64);
-    float* s_down_proj = (float*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE * sizeof(float), 64);
-    uint8_t* z_down_proj = (uint8_t*)clSVMAlloc(context, CL_MEM_READ_WRITE, 4096 * 14336 / QBLOCK_SIZE / 2, 64);
-    SVMMAP(queue, w_down_proj, 4096 * 14336 / 2);
-    SVMMAP(queue, s_down_proj, 4096 * 14336 / QBLOCK_SIZE * sizeof(float));
-    SVMMAP(queue, z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-    random_init_array((char*)w_down_proj, 4096 * 14336 / 2);
-    random_init_array((char*)s_down_proj, 4096 * 14336 / QBLOCK_SIZE);
-    random_init_array((char*)z_down_proj, 4096 * 14336 / QBLOCK_SIZE / 2);
-    SVMUNMAP(queue, w_down_proj);
-    SVMUNMAP(queue, s_down_proj);
-    SVMUNMAP(queue, z_down_proj);
-
-    // ==== bench ====
-    const int NIT = 1600; // roughly 500 tokens
-    auto start = chrono::high_resolution_clock::now();
-    for (int i = 0; i < NIT; i++) {
-        // FFN(x) = down_proj @ (up_proj @ x * gate_proj @ x)
-        // up_proj @ x
-        q4f32s_qi8f32s_egemv_offline(
-            w_up_proj, s_up_proj, z_up_proj,
-            io, input_scales,
-            out_up_proj, out_scales_up_proj,
-            14336, 4096);
-
-        // gate_proj @ x
-        q4f32s_qi8f32s_egemv_offline(
-            w_gate_proj, s_gate_proj, z_gate_proj,
-            io, input_scales,
-            out_gate_proj, out_scales_gate_proj,
-            14336, 4096);
-
-        // down_proj @ up_proj_out
-        q4f32s_qi8f32s_egemv_offline(
-            w_down_proj, s_down_proj, z_down_proj,
-            out_up_proj, out_scales_up_proj,
-            io, output_scales,
-            4096, 14336);
-    }
-    auto end = chrono::high_resolution_clock::now();
-
-    double sec = chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
-    cout << "total: " << sec << " (s)" << endl;
-    cout << "ms/it: " << sec * 1000 / NIT << " (ms)" << endl;
-
-    uint64_t flops_processed = 4096 * 14336 * 6 * (uint64_t)NIT;
-    double flops_per_sec = flops_processed / sec;
-    cout << "GFLOPS: " << flops_per_sec / 1e9 << endl;
-    cout << endl;
-
-    // ==== cleanup ====
-    clSVMFree(context, io);
-    clSVMFree(context, input_scales);
-    clSVMFree(context, w_up_proj);
-    clSVMFree(context, s_up_proj);
-    clSVMFree(context, z_up_proj);
-    clSVMFree(context, out_up_proj);
-    clSVMFree(context, out_scales_up_proj);
-    clSVMFree(context, w_gate_proj);
-    clSVMFree(context, s_gate_proj);
-    clSVMFree(context, z_gate_proj);
-    clSVMFree(context, out_gate_proj);
-    clSVMFree(context, out_scales_gate_proj);
-    clSVMFree(context, w_down_proj);
-    clSVMFree(context, s_down_proj);
-    clSVMFree(context, z_down_proj);
-}*/

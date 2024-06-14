@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __CAPSTONE_HPP
+#define __CAPSTONE_HPP
 
 #include "thread.hpp"
 #include <cstdint>
@@ -103,3 +104,5 @@ struct q4f32s_qi8f32s_ffn_params {
 };
 
 thread_ret_t q4f32s_qi8f32s_ffn_thread(void* params);
+
+#endif // __CAPSTONE_HPP

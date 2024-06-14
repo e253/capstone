@@ -19,18 +19,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(gtest);
 
     const argparse = b.dependency("argparse", .{});
-    const cl_headers_upstream = b.dependency("cl_headers_upstream", .{});
-
-    // build rocl
-    // const rocl = b.addStaticLibrary(.{
-    //     .name = "rocl",
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-    // rocl.addCSourceFiles(.{ .files = &.{"src/rocl.c"}, .flags = &.{"-DCL_TARGET_OPENCL_VERSION=300"} });
-    // rocl.linkLibC();
-    // rocl.addIncludePath(cl_headers_upstream.path(""));
-    // b.installArtifact(rocl);
+    const cl_h = b.dependency("cl_headers_upstream", .{});
+    const cl_hpp = b.dependency("cl_hpp", .{});
 
     // build OCL ICD
     const ocl_icd_upstream = b.dependency("ocl_icd", .{});
@@ -88,10 +78,19 @@ pub fn build(b: *std.Build) void {
         });
         opencl.addConfigHeader(icd_config_header);
     }
-    opencl.addIncludePath(cl_headers_upstream.path(""));
+    opencl.addIncludePath(cl_h.path(""));
     opencl.addIncludePath(ocl_icd_upstream.path("loader"));
     opencl.linkLibC();
     b.installArtifact(opencl);
+
+    // ===== collect cl_kernels into static library =====
+    const cl_src = b.addStaticLibrary(.{
+        .name = "clsrc",
+        .root_source_file = .{ .path = "src/kernels/cl_src.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(cl_src);
 
     // ===== test_ref ======
     {
@@ -100,10 +99,18 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        exe.addCSourceFiles(.{ .root = .{ .path = "." }, .files = &.{
-            "test/test_ref.cpp",
-            "src/ref.cpp",
-        }, .flags = &.{ "-Wall", "-Werror", "-std=c++17" } });
+        exe.addCSourceFiles(.{
+            .root = .{ .path = "." },
+            .files = &.{
+                "test/test_ref.cpp",
+                "src/ref.cpp",
+            },
+            .flags = &.{
+                "-Wall",
+                "-Werror",
+                "-std=c++17",
+            },
+        });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
         exe.linkLibC();
@@ -125,12 +132,22 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        exe.addCSourceFiles(.{ .root = .{ .path = "." }, .files = &.{
-            "test/test_impl.cpp",
-            "src/cpu.cpp",
-            "src/thread.cpp",
-            "src/ref.cpp",
-        }, .flags = &.{ "-Wall", "-Werror", "-std=c++17", "-mavx512f", "-mavx512bw" } });
+        exe.addCSourceFiles(.{
+            .root = .{ .path = "." },
+            .files = &.{
+                "test/test_impl.cpp",
+                "src/cpu.cpp",
+                "src/thread.cpp",
+                "src/ref.cpp",
+            },
+            .flags = &.{
+                "-Wall",
+                "-Werror",
+                "-std=c++17",
+                "-mavx512f",
+                "-mavx512bw",
+            },
+        });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
         exe.linkLibC();
@@ -155,59 +172,33 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        exe.addCSourceFiles(.{ .root = .{ .path = "src" }, .files = &.{
-            "igpu.cpp",
-            "ref.cpp",
-        }, .flags = &.{ "-Wall", "-Werror", "-std=c++17" } });
+        exe.addCSourceFiles(.{
+            .root = .{ .path = "." },
+            .files = &.{
+                "src/igpu.cpp",
+                "src/ref.cpp",
+                "test/test_igpu.cpp",
+            },
+            .flags = &.{
+                "-Wall",
+                "-Werror",
+                "-std=c++17",
+            },
+        });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
-        exe.addIncludePath(cl_headers_upstream.path(""));
+        exe.addIncludePath(cl_h.path(""));
+        exe.addIncludePath(cl_hpp.path("include"));
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(gtest);
-        // if (target.result.os.tag == .windows) {
-        //     exe.addLibraryPath(.{ .path = "C:\\Windows\\System32" });
-        //     exe.linkSystemLibrary2("opencl", .{ .preferred_link_mode = .dynamic });
-        // } else {
-        //     exe.linkSystemLibrary("OpenCL");
-        // }
         exe.linkLibrary(opencl);
-        b.installArtifact(exe);
+        exe.linkLibrary(cl_src);
 
         const run_cmd = b.addRunArtifact(exe);
         run_cmd.step.dependOn(b.getInstallStep());
         if (b.args) |args| run_cmd.addArgs(args);
         const run_step = b.step("test_igpu", "Test IGPU Implementation");
-        run_step.dependOn(&run_cmd.step);
-    }
-
-    // test_rocl
-    {
-        const exe = b.addExecutable(.{
-            .name = "test_rocl",
-            .target = target,
-            .optimize = optimize,
-        });
-        exe.addCSourceFiles(.{ .root = .{
-            .path = "test",
-        }, .files = &.{
-            "test_rocl.cpp",
-        }, .flags = &.{
-            "-std=c++17",
-        } });
-        exe.addIncludePath(.{ .path = "include" });
-        exe.addIncludePath(gtest_upstream.path("googletest/include"));
-        exe.addIncludePath(cl_headers_upstream.path(""));
-        exe.linkLibC();
-        exe.linkLibCpp();
-        exe.linkLibrary(gtest);
-        exe.linkLibrary(opencl);
-        b.installArtifact(exe);
-
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| run_cmd.addArgs(args);
-        const run_step = b.step("test_rocl", "Test rocl.h");
         run_step.dependOn(&run_cmd.step);
     }
 
@@ -218,22 +209,27 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
         });
-        exe.addCSourceFiles(.{ .root = .{ .path = "src" }, .files = &.{
-            "igpu.cpp",
-        }, .flags = &.{ "-DBENCH", "-Wall", "-Werror", "-std=c++17" } });
+        exe.addCSourceFiles(.{
+            .root = .{ .path = "." },
+            .files = &.{
+                "bench/igpu.cpp",
+                "src/igpu.cpp",
+            },
+            .flags = &.{
+                "-Wall",
+                "-Werror",
+                "-std=c++17",
+            },
+        });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(gtest_upstream.path("googletest/include"));
-        exe.addIncludePath(cl_headers_upstream.path(""));
+        exe.addIncludePath(cl_h.path(""));
+        exe.addIncludePath(cl_hpp.path("include"));
         exe.linkLibC();
         exe.linkLibCpp();
         exe.linkLibrary(gtest);
-        // if (target.result.os.tag == .windows) {
-        //     exe.addLibraryPath(.{ .path = "C:\\Windows\\System32" });
-        //     exe.linkSystemLibrary2("opencl", .{ .preferred_link_mode = .dynamic });
-        // } else {
-        //     exe.linkSystemLibrary("OpenCL");
-        // }
         exe.linkLibrary(opencl);
+        exe.linkLibrary(cl_src);
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
@@ -250,13 +246,17 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
         });
-        exe.addCSourceFiles(.{ .root = .{
-            .path = "bench",
-        }, .files = &.{
-            "ggml.cpp",
-        }, .flags = &.{
-            "-std=c++17",
-        } });
+        exe.addCSourceFiles(.{
+            .root = .{
+                .path = "bench",
+            },
+            .files = &.{
+                "ggml.cpp",
+            },
+            .flags = &.{
+                "-std=c++17",
+            },
+        });
         exe.addIncludePath(.{ .path = "include" });
         exe.linkLibC();
         exe.linkLibCpp();
@@ -282,17 +282,21 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
         });
-        exe.addCSourceFiles(.{ .root = .{
-            .path = ".",
-        }, .files = &.{
-            "src/cpu.cpp",
-            "src/thread.cpp",
-            "bench/cpu.cpp",
-        }, .flags = &.{
-            "-std=c++17",
-            "-mavx512f",
-            "-O3",
-        } });
+        exe.addCSourceFiles(.{
+            .root = .{
+                .path = ".",
+            },
+            .files = &.{
+                "src/cpu.cpp",
+                "src/thread.cpp",
+                "bench/cpu.cpp",
+            },
+            .flags = &.{
+                "-std=c++17",
+                "-mavx512f",
+                "-O3",
+            },
+        });
         exe.addIncludePath(.{ .path = "include" });
         exe.addIncludePath(argparse.path("include"));
         exe.linkLibC();

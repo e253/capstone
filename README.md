@@ -8,7 +8,7 @@ I've continued to make pushes after graduation in May and hope to continue makin
 
 Here's a few things I'd like to try:
 
-- [ ] Separate OpenCL kernels into separate files.
+- [x] Separate OpenCL kernels into separate files. (6/14)
 - [ ] Compile `OpenCL-C` to SPIR-V at build-time instead of runtime.
   - This is possible with [KhronosGroup/SPIRV-LLVM-Translator](https://github.com/KhronosGroup/SPIRV-LLVM-Translator). SPIRV-LLVM-Translator is highly inconvient to build and use. Maybe it needs a `build.zig`.
   - Alternatively, Zig with `callconv(.Kernel)` can generate PTX and SPIRV kernels. Maybe that's a better solution. 

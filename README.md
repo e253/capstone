@@ -2,7 +2,7 @@
 
 This repository houses my undergraduate thesis: *EGEMV On Intel SoCs*.
 
-The full report is in the repo in the `/report` folder and hosted through github pages: [https://e253.github.io/capstone/report/Steere_Ethan_B__EGEMV_On_Intel_SoCs.pdf](https://e253.github.io/capstone/report/Steere_Ethan_B__EGEMV_On_Intel_SoCs.pdf)
+The full report is in the repo in the `/report` folder: [Steere_Ethan_B__EGEMV_On_Intel_SoCs.pdf](https://raw.githubusercontent.com/e253/capstone/main/report/Steere_Ethan_B__EGEMV_On_Intel_SoCs.pdf)
 
 I've continued to make pushes after graduation in May and hope to continue making improvements when I can.
 
